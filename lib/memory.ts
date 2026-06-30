@@ -1,4 +1,4 @@
-import { put, del, head } from "@vercel/blob";
+import { put, del, head, BlobNotFoundError } from "@vercel/blob";
 
 /**
  * 核心记忆（Core Memory）—— 用户偏好 / 性格 / 目标 / 身份等
@@ -14,13 +14,20 @@ function pathname(userId: string): string {
 
 /** 读取用户核心记忆 markdown。文件不存在或读取失败时返回空字符串。 */
 export async function readCoreMemory(userId: string): Promise<string> {
-  const metadata = await head(pathname(userId));
-  const content = await (
-    await fetch(metadata.url, {
-      headers: { Authorization: `Bearer ${process.env.BLOB_READ_WRITE_TOKEN}` },
-    })
-  ).text();
-  return content;
+  try {
+    const metadata = await head(pathname(userId));
+    const content = await (
+      await fetch(metadata.url, {
+        headers: {
+          Authorization: `Bearer ${process.env.BLOB_READ_WRITE_TOKEN}`,
+        },
+      })
+    ).text();
+    return content;
+  } catch (error) {
+    if (error instanceof BlobNotFoundError) return "";
+    else throw error;
+  }
 }
 
 /** 写入（覆盖）用户核心记忆 markdown。 */
