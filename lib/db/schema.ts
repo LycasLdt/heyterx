@@ -6,6 +6,31 @@ import type { UIMessage } from "ai";
  * 用户偏好设置（保存在 user.preferences jsonb 列）
  * better-auth 不管理此字段，由应用层直接读写
  */
+
+/** 自定义模型 API 格式 */
+export type ModelApiFormat = "openai" | "claude";
+
+/** 单条自定义模型配置 */
+export type ModelConfig = {
+  /** 唯一 id（前端生成，uuid 或简单随机串） */
+  id: string;
+  /** 模型名称（用于展示，如「GPT-4o 多模态」） */
+  name: string;
+  /** API 格式：openai（/v1/chat/completions 兼容）/ claude（Anthropic /v1/messages） */
+  apiFormat: ModelApiFormat;
+  /** 模型 id（传给上游 API 的 model 字段，如 gpt-4o） */
+  modelId: string;
+  /** 调用地址（baseURL，如 https://api.openai.com/v1） */
+  baseURL: string;
+  /** API Key（明文存储于偏好；用户私有，仅服务端取用） */
+  apiKey: string;
+  /** 是否支持多模态（图片/音频/视频等附件输入） */
+  multimodal: boolean;
+};
+
+/** 新一天打开后过去未完成任务的迁移模式 */
+export type MigrationMode = "none" | "important" | "all";
+
 export type UserPreferences = {
   general: {
     /** 主题：light / dark / system */
@@ -18,6 +43,23 @@ export type UserPreferences = {
     role: string;
     /** 技能设定：用户为 Agent 添加的多项技能 prompt */
     skills: string[];
+    /** 行为设定 */
+    behavior: {
+      /**
+       * 新一天打开后过去未完成任务的迁移模式：
+       * - "none"：不迁移
+       * - "important"：仅迁移重要任务（重要且紧急 / 重要但不紧急）
+       * - "all"：全部迁移
+       * 默认 "important"
+       */
+      migrationMode: MigrationMode;
+    };
+  };
+  models: {
+    /** 默认对话模型 id；为空字符串时使用内置 deepseek-v4-flash */
+    defaultModelId: string;
+    /** 用户自定义的模型列表 */
+    configs: ModelConfig[];
   };
 };
 
@@ -30,6 +72,13 @@ export type PreferencesPatch = {
   agent?: {
     role?: string;
     skills?: string[];
+    behavior?: {
+      migrationMode?: MigrationMode;
+    };
+  };
+  models?: {
+    defaultModelId?: string;
+    configs?: ModelConfig[];
   };
 };
 
@@ -135,6 +184,12 @@ export const task = pgTable("task", {
   segmentId: text("segment_id").references(() => taskSegment.id, {
     onDelete: "set null",
   }),
+  // 自定义标签数组（自由输入，系统自动收集所有用过的标签供筛选）
+  tags: text("tags").array().notNull().default([]),
+  // 提醒时间（可选，ISO 字符串）；到点由 Service Worker 触发浏览器通知
+  reminderAt: timestamp("reminder_at", { withTimezone: true }),
+  // 提醒是否已触发（避免重复通知）；触发后置 true
+  reminderNotified: boolean("reminder_notified").notNull().default(false),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });

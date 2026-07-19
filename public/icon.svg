@@ -1,16 +1,13 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="heyterx">
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#22c55e"/>
-      <stop offset="1" stop-color="#15803d"/>
-    </linearGradient>
-  </defs>
-  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
-  <g fill="#ffffff">
-    <rect x="244" y="250" width="24" height="150" rx="12"/>
-    <g transform="translate(256 252)">
-      <ellipse cx="-40" cy="0" rx="58" ry="30" transform="rotate(-28)"/>
-      <ellipse cx="40" cy="0" rx="58" ry="30" transform="rotate(28)"/>
+<?xml version="1.0" encoding="utf-8"?>
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <g>
+    <path d="M150 0L362 0C444.854 0 512 67.146 512 150L512 362C512 444.854 444.854 512 362 512L150 512C67.146 512 0 444.854 0 362L0 150C0 67.146 67.146 0 150 0L150 0Z" fill="#F7F7F7" transform="matrix(1 0 0 -1 0 512)" />
+    <g transform="translate(88 130)">
+      <path d="M0 12C0 5.37258 5.37258 0 12 0C18.6274 0 24 5.37258 24 12C24 18.6274 18.6274 24 12 24C5.37258 24 0 18.6274 0 12Z" fill="#808080" fill-rule="evenodd" fill-opacity="0.851" transform="translate(87.933 117.244)" />
+      <path d="M0 12C0 5.37258 5.37259 0 12 0C18.6274 0 24 5.37258 24 12C24 18.6274 18.6274 24 12 24C5.37259 24 0 18.6274 0 12Z" fill="#808080" fill-rule="evenodd" fill-opacity="0.851" transform="translate(224.718 84.676)" />
+      <path d="M1.90799 116.197C1.90799 116.197 -14.9878 188.381 51.7766 172.505C118.541 156.628 281.917 -1.52588e-05 281.917 -1.52588e-05" fill="none" stroke-width="12" stroke="#1CB02D" stroke-linecap="round" transform="matrix(0.906 0.423 -0.423 0.906 79.946 63.237)" />
+      <path d="M33.9228 167.724C33.9228 167.724 -26.8388 85.8071 14.2782 52.425C55.3953 19.043 77.8907 79.7913 129.999 66.7642C182.108 53.737 173.966 3.38496e-06 222.818 0C271.67 0 299.76 26.8685 325.407 66.7642C351.054 106.66 325.407 159.583 325.407 159.583" fill="none" stroke-width="12" stroke="#808080" stroke-linecap="round" />
+      <path d="M0 9.77036C0 9.77036 14.4677 18.9881 31.5658 16.5455C48.6639 14.1029 68.3925 0 68.3925 0" fill="none" stroke-width="12" stroke="#929292" stroke-linecap="round" transform="matrix(1 0 0 1 140.042 161.211)" />
     </g>
   </g>
 </svg>

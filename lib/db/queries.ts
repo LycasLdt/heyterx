@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, lte } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, lte } from "drizzle-orm";
 import type { UIMessage } from "ai";
 import { db } from "@/lib/db";
 import {
@@ -7,6 +7,7 @@ import {
   conversation as conversationTable,
   report as reportTable,
   user as userTable,
+  type ModelConfig,
   type PreferencesPatch,
   type ReportMetrics,
   type ReportPlan,
@@ -17,25 +18,56 @@ import {
 /** 默认用户偏好（数据库中 preferences 为 NULL 时使用） */
 export const DEFAULT_PREFERENCES: UserPreferences = {
   general: { theme: "system", defaultTaskView: "list" },
-  agent: { role: "", skills: [] },
+  agent: { role: "", skills: [], behavior: { migrationMode: "important" } },
+  models: { defaultModelId: "", configs: [] },
 };
 
-/** 深合并两个 UserPreferences（patch 覆盖 base，skills 数组整体替换） */
+/** 深合并两个 UserPreferences（patch 覆盖 base，数组整体替换） */
 export function mergePreferences(
   base: UserPreferences,
-  patch: PreferencesPatch
+  patch: PreferencesPatch,
 ): UserPreferences {
+  const baseAgent = base.agent ?? DEFAULT_PREFERENCES.agent;
+  const baseBehavior = baseAgent.behavior ?? DEFAULT_PREFERENCES.agent.behavior;
   return {
     general: {
       theme: patch.general?.theme ?? base.general.theme,
-      defaultTaskView: patch.general?.defaultTaskView ?? base.general.defaultTaskView,
+      defaultTaskView:
+        patch.general?.defaultTaskView ?? base.general.defaultTaskView,
     },
     agent: {
-      role: patch.agent?.role ?? base.agent.role,
-      skills: patch.agent?.skills ?? base.agent.skills,
+      role: patch.agent?.role ?? baseAgent.role,
+      skills: patch.agent?.skills ?? baseAgent.skills,
+      behavior: {
+        migrationMode:
+          patch.agent?.behavior?.migrationMode ?? baseBehavior.migrationMode,
+      },
+    },
+    models: {
+      defaultModelId:
+        patch.models?.defaultModelId ??
+        (base.models ?? DEFAULT_PREFERENCES.models).defaultModelId,
+      configs:
+        patch.models?.configs ??
+        (base.models ?? DEFAULT_PREFERENCES.models).configs,
     },
   };
 }
+
+/** 根据模型 id 查找用户模型配置；找不到返回 null */
+export function findModelConfig(
+  prefs: UserPreferences,
+  modelId: string,
+): ModelConfig | null {
+  return prefs.models.configs.find((c) => c.id === modelId) ?? null;
+}
+
+/** MiMo-V2.5-ASR 默认语音识别模型配置（不在用户列表中，固定常量） */
+export const DEFAULT_ASR_MODEL = {
+  apiFormat: "openai" as const,
+  modelId: "mimo-v2.5-asr",
+  baseURL: "https://api.xiaomimimo.com/v1",
+};
 
 /**
  * 任务属性常量与类型
@@ -71,6 +103,12 @@ export type Task = {
   importance: Importance;
   category: Category;
   segmentId?: string;
+  /** 自定义标签数组（自由输入） */
+  tags: string[];
+  /** 提醒时间 ISO 字符串，未设置则 undefined */
+  reminderAt?: string;
+  /** 提醒是否已触发 */
+  reminderNotified: boolean;
 };
 
 /** 按日期分组的任务地图，key 为 YYYY-MM-DD */
@@ -93,6 +131,9 @@ function rowToTask(row: {
   importance: string;
   category: string;
   segmentId?: string | null;
+  tags: string[] | null;
+  reminderAt: Date | null;
+  reminderNotified: boolean | null;
 }): Task {
   return {
     id: row.id,
@@ -101,8 +142,24 @@ function rowToTask(row: {
     importance: row.importance as Importance,
     category: row.category as Category,
     segmentId: row.segmentId ?? undefined,
+    tags: row.tags ?? [],
+    reminderAt: row.reminderAt ? row.reminderAt.toISOString() : undefined,
+    reminderNotified: row.reminderNotified ?? false,
   };
 }
+
+/** task 表查询的公共字段（不含 date，需要 date 的查询单独加） */
+const TASK_FIELDS = {
+  id: taskTable.id,
+  title: taskTable.title,
+  done: taskTable.done,
+  importance: taskTable.importance,
+  category: taskTable.category,
+  segmentId: taskTable.segmentId,
+  tags: taskTable.tags,
+  reminderAt: taskTable.reminderAt,
+  reminderNotified: taskTable.reminderNotified,
+} as const;
 
 /* ------------------------------------------------------------------ */
 /* Task 查询                                                           */
@@ -111,15 +168,7 @@ function rowToTask(row: {
 /** 加载用户全部任务并按日期分组 */
 export async function loadTasksByDate(userId: string): Promise<TasksByDate> {
   const rows = await db
-    .select({
-      id: taskTable.id,
-      title: taskTable.title,
-      done: taskTable.done,
-      importance: taskTable.importance,
-      category: taskTable.category,
-      segmentId: taskTable.segmentId,
-      date: taskTable.date,
-    })
+    .select({ ...TASK_FIELDS, date: taskTable.date })
     .from(taskTable)
     .where(eq(taskTable.userId, userId));
   const byDate: TasksByDate = {};
@@ -133,17 +182,10 @@ export async function loadTasksByDate(userId: string): Promise<TasksByDate> {
 /** 加载某天任务 */
 export async function loadDayTasks(
   userId: string,
-  date: string
+  date: string,
 ): Promise<Task[]> {
   const rows = await db
-    .select({
-      id: taskTable.id,
-      title: taskTable.title,
-      done: taskTable.done,
-      importance: taskTable.importance,
-      category: taskTable.category,
-      segmentId: taskTable.segmentId,
-    })
+    .select(TASK_FIELDS)
     .from(taskTable)
     .where(and(eq(taskTable.userId, userId), eq(taskTable.date, date)));
   return rows.map(rowToTask);
@@ -152,15 +194,7 @@ export async function loadDayTasks(
 /** 按 id 查找任务（含 date，用于 move 等场景） */
 export async function findTaskById(userId: string, id: string) {
   const [row] = await db
-    .select({
-      id: taskTable.id,
-      title: taskTable.title,
-      done: taskTable.done,
-      importance: taskTable.importance,
-      category: taskTable.category,
-      segmentId: taskTable.segmentId,
-      date: taskTable.date,
-    })
+    .select({ ...TASK_FIELDS, date: taskTable.date })
     .from(taskTable)
     .where(and(eq(taskTable.id, id), eq(taskTable.userId, userId)));
   return row ?? null;
@@ -170,31 +204,26 @@ export async function findTaskById(userId: string, id: string) {
 export async function findTaskByIdAndDate(
   userId: string,
   id: string,
-  date: string
+  date: string,
 ) {
   const [row] = await db
-    .select({
-      id: taskTable.id,
-      title: taskTable.title,
-      done: taskTable.done,
-      importance: taskTable.importance,
-      category: taskTable.category,
-      segmentId: taskTable.segmentId,
-    })
+    .select(TASK_FIELDS)
     .from(taskTable)
     .where(
       and(
         eq(taskTable.id, id),
         eq(taskTable.userId, userId),
-        eq(taskTable.date, date)
-      )
+        eq(taskTable.date, date),
+      ),
     );
   return row ?? null;
 }
 
 /** 新增任务（默认未完成），返回生成的 Task
  *  importance / category 不传则使用 schema 默认值（重要但不紧急 / 智育）
- *  segmentId 可选，关联到任务段 */
+ *  segmentId 可选，关联到任务段
+ *  tags 可选，自定义标签数组
+ *  reminderAt 可选，提醒时间 ISO 字符串 */
 export async function insertTask(
   userId: string,
   input: {
@@ -203,7 +232,9 @@ export async function insertTask(
     importance?: Importance;
     category?: Category;
     segmentId?: string;
-  }
+    tags?: string[];
+    reminderAt?: string;
+  },
 ): Promise<Task> {
   const [inserted] = await db
     .insert(taskTable)
@@ -215,15 +246,10 @@ export async function insertTask(
       importance: input.importance,
       category: input.category,
       segmentId: input.segmentId,
+      tags: input.tags,
+      reminderAt: input.reminderAt ? new Date(input.reminderAt) : null,
     })
-    .returning({
-      id: taskTable.id,
-      title: taskTable.title,
-      done: taskTable.done,
-      importance: taskTable.importance,
-      category: taskTable.category,
-      segmentId: taskTable.segmentId,
-    });
+    .returning(TASK_FIELDS);
   return rowToTask(inserted);
 }
 
@@ -236,7 +262,9 @@ export async function insertTasks(
     importance?: Importance;
     category?: Category;
     segmentId?: string;
-  }>
+    tags?: string[];
+    reminderAt?: string;
+  }>,
 ): Promise<Task[]> {
   if (inputs.length === 0) return [];
   const rows = await db
@@ -250,16 +278,11 @@ export async function insertTasks(
         importance: input.importance,
         category: input.category,
         segmentId: input.segmentId,
-      }))
+        tags: input.tags,
+        reminderAt: input.reminderAt ? new Date(input.reminderAt) : null,
+      })),
     )
-    .returning({
-      id: taskTable.id,
-      title: taskTable.title,
-      done: taskTable.done,
-      importance: taskTable.importance,
-      category: taskTable.category,
-      segmentId: taskTable.segmentId,
-    });
+    .returning(TASK_FIELDS);
   return rows.map(rowToTask);
 }
 
@@ -267,20 +290,13 @@ export async function insertTasks(
 export async function setTaskDone(
   userId: string,
   id: string,
-  done: boolean
+  done: boolean,
 ): Promise<Task | null> {
   const [updated] = await db
     .update(taskTable)
     .set({ done, updatedAt: new Date() })
     .where(and(eq(taskTable.id, id), eq(taskTable.userId, userId)))
-    .returning({
-      id: taskTable.id,
-      title: taskTable.title,
-      done: taskTable.done,
-      importance: taskTable.importance,
-      category: taskTable.category,
-      segmentId: taskTable.segmentId,
-    });
+    .returning(TASK_FIELDS);
   return updated ? rowToTask(updated) : null;
 }
 
@@ -288,20 +304,52 @@ export async function setTaskDone(
 export async function setTaskTitle(
   userId: string,
   id: string,
-  title: string
+  title: string,
 ): Promise<Task | null> {
   const [updated] = await db
     .update(taskTable)
     .set({ title, updatedAt: new Date() })
     .where(and(eq(taskTable.id, id), eq(taskTable.userId, userId)))
-    .returning({
-      id: taskTable.id,
-      title: taskTable.title,
-      done: taskTable.done,
-      importance: taskTable.importance,
-      category: taskTable.category,
-      segmentId: taskTable.segmentId,
-    });
+    .returning(TASK_FIELDS);
+  return updated ? rowToTask(updated) : null;
+}
+
+/**
+ * 通用任务更新：支持修改 title / importance / category / tags / reminderAt /
+ * segmentId。只更新传入的字段，未传字段保持不变。reminderAt 传 null 表示清除提醒。
+ * 返回更新后的 Task；不存在则返回 null。
+ */
+export async function updateTaskFields(
+  userId: string,
+  id: string,
+  input: {
+    title?: string;
+    importance?: Importance;
+    category?: Category;
+    tags?: string[];
+    reminderAt?: string | null;
+    segmentId?: string | null;
+  },
+): Promise<Task | null> {
+  const updates: Partial<typeof taskTable.$inferInsert> = {};
+  if (input.title !== undefined) updates.title = input.title;
+  if (input.importance !== undefined) updates.importance = input.importance;
+  if (input.category !== undefined) updates.category = input.category;
+  if (input.tags !== undefined) updates.tags = input.tags;
+  if (input.reminderAt !== undefined) {
+    updates.reminderAt = input.reminderAt ? new Date(input.reminderAt) : null;
+    // 重新设置提醒时重置通知标记
+    if (input.reminderAt) updates.reminderNotified = false;
+  }
+  if (input.segmentId !== undefined) updates.segmentId = input.segmentId;
+  if (Object.keys(updates).length === 0) return null;
+  updates.updatedAt = new Date();
+
+  const [updated] = await db
+    .update(taskTable)
+    .set(updates)
+    .where(and(eq(taskTable.id, id), eq(taskTable.userId, userId)))
+    .returning(TASK_FIELDS);
   return updated ? rowToTask(updated) : null;
 }
 
@@ -309,40 +357,140 @@ export async function setTaskTitle(
 export async function setTaskDate(
   userId: string,
   id: string,
-  date: string
+  date: string,
 ): Promise<Task | null> {
   const [updated] = await db
     .update(taskTable)
     .set({ date, updatedAt: new Date() })
     .where(and(eq(taskTable.id, id), eq(taskTable.userId, userId)))
-    .returning({
-      id: taskTable.id,
-      title: taskTable.title,
-      done: taskTable.done,
-      importance: taskTable.importance,
-      category: taskTable.category,
-      segmentId: taskTable.segmentId,
-    });
+    .returning(TASK_FIELDS);
   return updated ? rowToTask(updated) : null;
+}
+
+/**
+ * 收集「过去未完成任务迁移决策」所需的只读上下文。
+ *
+ * 不执行任何写操作——迁移方式（直接 moveTask / 合并 deleteTask+addTask /
+ * 跳过孤立历史任务）由 agent 自主决策。
+ *
+ * 返回：
+ * - pastIncomplete: 过去日期（< today）中所有未完成任务，按日期升序，
+ *   含 id/title/date/importance/category/segmentId，供 agent 决策。
+ * - segments: 用户全部任务段（agent 据此判断「任务段开始前的孤立任务」
+ *   是否应跳过迁移）。
+ * - futureCounts: 今天起未来 14 天每日已有任务数（agent 据此选择空闲日，
+ *   避免把任务挪到已满的日子）。
+ */
+export async function getPastIncompleteTasksData(
+  userId: string,
+  today: string,
+): Promise<{
+  pastIncomplete: Array<Task & { date: string }>;
+  segments: TaskSegment[];
+  futureCounts: Array<{ date: string; count: number }>;
+}> {
+  const [byDate, segments] = await Promise.all([
+    loadTasksByDate(userId),
+    loadSegments(userId),
+  ]);
+
+  const pastIncomplete: Array<Task & { date: string }> = [];
+  for (const [d, list] of Object.entries(byDate)) {
+    if (d >= today) continue;
+    for (const t of list) {
+      if (!t.done) pastIncomplete.push({ ...t, date: d });
+    }
+  }
+  pastIncomplete.sort((a, b) => a.date.localeCompare(b.date));
+
+  // 今天起未来 14 天每日任务数
+  const todayMs = Date.parse(`${today}T00:00:00Z`);
+  const dayMs = 24 * 60 * 60 * 1000;
+  const futureCounts: Array<{ date: string; count: number }> = [];
+  for (let i = 0; i < 14; i++) {
+    const ds = new Date(todayMs + i * dayMs).toISOString().slice(0, 10);
+    futureCounts.push({ date: ds, count: byDate[ds]?.length ?? 0 });
+  }
+
+  return { pastIncomplete, segments, futureCounts };
 }
 
 /** 删除任务，返回被删除的 Task；不存在则返回 null */
 export async function removeTask(
   userId: string,
-  id: string
+  id: string,
 ): Promise<Task | null> {
   const [deleted] = await db
     .delete(taskTable)
     .where(and(eq(taskTable.id, id), eq(taskTable.userId, userId)))
-    .returning({
+    .returning(TASK_FIELDS);
+  return deleted ? rowToTask(deleted) : null;
+}
+
+/** 收集用户所有用过的自定义标签（去重，按字母序），供筛选下拉自动补全 */
+export async function loadAllTags(userId: string): Promise<string[]> {
+  const rows = await db
+    .select({ tags: taskTable.tags })
+    .from(taskTable)
+    .where(eq(taskTable.userId, userId));
+  const set = new Set<string>();
+  for (const r of rows) {
+    if (r.tags) for (const t of r.tags) if (t) set.add(t);
+  }
+  return Array.from(set).sort((a, b) => a.localeCompare(b, "zh-Hans-CN"));
+}
+
+/**
+ * 查询已到点但尚未通知的提醒任务（供 Service Worker 轮询）。
+ * 返回任务的 id / title / date / reminderAt，到点的逐一触发通知后由
+ * markReminderNotified 标记，避免重复通知。
+ */
+export async function loadDueReminders(
+  userId: string,
+  now: Date = new Date(),
+): Promise<
+  Array<{ id: string; title: string; date: string; reminderAt: string }>
+> {
+  const rows = await db
+    .select({
       id: taskTable.id,
       title: taskTable.title,
-      done: taskTable.done,
-      importance: taskTable.importance,
-      category: taskTable.category,
-      segmentId: taskTable.segmentId,
-    });
-  return deleted ? rowToTask(deleted) : null;
+      date: taskTable.date,
+      reminderAt: taskTable.reminderAt,
+    })
+    .from(taskTable)
+    .where(
+      and(
+        eq(taskTable.userId, userId),
+        eq(taskTable.reminderNotified, false),
+        lte(taskTable.reminderAt, now),
+      ),
+    );
+  return rows
+    .filter((r) => r.reminderAt !== null)
+    .map((r) => ({
+      id: r.id,
+      title: r.title,
+      date: r.date,
+      reminderAt: r.reminderAt!.toISOString(),
+    }));
+}
+
+/** 批量标记任务提醒已通知，避免重复触发 */
+export async function markRemindersNotified(
+  userId: string,
+  ids: string[],
+): Promise<void> {
+  if (ids.length === 0) return;
+  await db
+    .update(taskTable)
+    .set({ reminderNotified: true, updatedAt: new Date() })
+    .where(
+      and(
+        eq(taskTable.userId, userId),
+        inArray(taskTable.id, ids),
+      ),
+    );
 }
 
 /* ------------------------------------------------------------------ */
@@ -387,7 +535,7 @@ export async function loadSegments(userId: string): Promise<TaskSegment[]> {
 /** 加载覆盖指定日期的所有任务段 */
 export async function loadSegmentsForDate(
   userId: string,
-  date: string
+  date: string,
 ): Promise<TaskSegment[]> {
   const rows = await db
     .select(SEGMENT_FIELDS)
@@ -396,8 +544,8 @@ export async function loadSegmentsForDate(
       and(
         eq(taskSegmentTable.userId, userId),
         lte(taskSegmentTable.startDate, date),
-        gte(taskSegmentTable.endDate, date)
-      )
+        gte(taskSegmentTable.endDate, date),
+      ),
     );
   return rows.map(rowToSegment);
 }
@@ -405,13 +553,13 @@ export async function loadSegmentsForDate(
 /** 按 id 查找任务段 */
 export async function findSegmentById(
   userId: string,
-  id: string
+  id: string,
 ): Promise<TaskSegment | null> {
   const [row] = await db
     .select(SEGMENT_FIELDS)
     .from(taskSegmentTable)
     .where(
-      and(eq(taskSegmentTable.id, id), eq(taskSegmentTable.userId, userId))
+      and(eq(taskSegmentTable.id, id), eq(taskSegmentTable.userId, userId)),
     );
   return row ? rowToSegment(row) : null;
 }
@@ -427,7 +575,7 @@ export async function createSegment(
     startDate: string;
     endDate: string;
     description?: string;
-  }
+  },
 ): Promise<TaskSegment | { error: string }> {
   // 唯一性校验：同 name + 同 startDate + 同 endDate 视为重复
   const [dup] = await db
@@ -438,8 +586,8 @@ export async function createSegment(
         eq(taskSegmentTable.userId, userId),
         eq(taskSegmentTable.name, input.name),
         eq(taskSegmentTable.startDate, input.startDate),
-        eq(taskSegmentTable.endDate, input.endDate)
-      )
+        eq(taskSegmentTable.endDate, input.endDate),
+      ),
     )
     .limit(1);
   if (dup) return { error: "已存在相同名称与日期范围的任务段" };
@@ -466,7 +614,7 @@ export async function updateSegment(
     startDate?: string;
     endDate?: string;
     description?: string;
-  }
+  },
 ): Promise<TaskSegment | null> {
   const updates: Partial<typeof taskSegmentTable.$inferInsert> = {};
   if (input.name !== undefined) updates.name = input.name;
@@ -480,7 +628,7 @@ export async function updateSegment(
     .update(taskSegmentTable)
     .set(updates)
     .where(
-      and(eq(taskSegmentTable.id, id), eq(taskSegmentTable.userId, userId))
+      and(eq(taskSegmentTable.id, id), eq(taskSegmentTable.userId, userId)),
     )
     .returning(SEGMENT_FIELDS);
   return updated ? rowToSegment(updated) : null;
@@ -499,7 +647,7 @@ export type ConversationRow = {
 
 /** 取用户最近一次对话（按 updatedAt 降序） */
 export async function getLatestConversation(
-  userId: string
+  userId: string,
 ): Promise<ConversationRow | null> {
   const [latest] = await db
     .select({
@@ -529,10 +677,8 @@ export async function clearConversations(userId: string): Promise<void> {
  */
 export async function searchConversations(
   userId: string,
-  keywords: string[]
-): Promise<
-  Array<{ role: string; text: string; date: string }>
-> {
+  keywords: string[],
+): Promise<Array<{ role: string; text: string; date: string }>> {
   const conv = await getLatestConversation(userId);
   if (!conv || keywords.length === 0) return [];
 
@@ -569,9 +715,7 @@ function pickTitle(messages: UIMessage[]): string {
     if (msg.role !== "user") continue;
     for (const part of msg.parts) {
       if (part.type === "text" && part.text) {
-        return part.text.length > 30
-          ? part.text.slice(0, 30) + "…"
-          : part.text;
+        return part.text.length > 30 ? part.text.slice(0, 30) + "…" : part.text;
       }
     }
   }
@@ -584,7 +728,7 @@ function pickTitle(messages: UIMessage[]): string {
  */
 export async function saveConversation(
   userId: string,
-  input: { id?: string; messages: UIMessage[] }
+  input: { id?: string; messages: UIMessage[] },
 ): Promise<string> {
   const { messages, id } = input;
   const title = pickTitle(messages);
@@ -594,10 +738,7 @@ export async function saveConversation(
       .update(conversationTable)
       .set({ messages, title, updatedAt: new Date() })
       .where(
-        and(
-          eq(conversationTable.id, id),
-          eq(conversationTable.userId, userId)
-        )
+        and(eq(conversationTable.id, id), eq(conversationTable.userId, userId)),
       )
       .returning({ id: conversationTable.id });
     if (updated) return updated.id;
@@ -710,14 +851,17 @@ export function computeMetrics(tasks: Task[]): ReportMetrics {
   });
 
   // 心理绿芽指数：各维度分数 = 该维度任务完成率，加权求和
-  const dimensions = GROWTH_DIMENSION_CONFIG.map(({ category, label, weight }) => {
-    const list = tasks.filter((t) => t.category === category);
-    const completed = list.filter((t) => t.done).length;
-    const score = list.length === 0 ? 0 : Math.round((completed / list.length) * 100);
-    return { category, label, score, weight };
-  });
+  const dimensions = GROWTH_DIMENSION_CONFIG.map(
+    ({ category, label, weight }) => {
+      const list = tasks.filter((t) => t.category === category);
+      const completed = list.filter((t) => t.done).length;
+      const score =
+        list.length === 0 ? 0 : Math.round((completed / list.length) * 100);
+      return { category, label, score, weight };
+    },
+  );
   const growthTotal = Math.round(
-    dimensions.reduce((sum, d) => sum + d.score * d.weight, 0)
+    dimensions.reduce((sum, d) => sum + d.score * d.weight, 0),
   );
 
   return {
@@ -730,31 +874,23 @@ export function computeMetrics(tasks: Task[]): ReportMetrics {
   };
 }
 
-/** 加载周期内任务（按日期范围过滤） */
+/** 加载周期内任务（按日期范围过滤），返回带 date 的任务（供报告生成器按日期分组） */
 export async function loadTasksInRange(
   userId: string,
   startDate: string,
-  endDate: string
-): Promise<Task[]> {
+  endDate: string,
+): Promise<Array<Task & { date: string }>> {
   const rows = await db
-    .select({
-      id: taskTable.id,
-      title: taskTable.title,
-      done: taskTable.done,
-      importance: taskTable.importance,
-      category: taskTable.category,
-      segmentId: taskTable.segmentId,
-      date: taskTable.date,
-    })
+    .select({ ...TASK_FIELDS, date: taskTable.date })
     .from(taskTable)
     .where(
       and(
         eq(taskTable.userId, userId),
         gte(taskTable.date, startDate),
-        lte(taskTable.date, endDate)
-      )
+        lte(taskTable.date, endDate),
+      ),
     );
-  return rows.map(rowToTask);
+  return rows.map((r) => ({ ...rowToTask(r), date: r.date }));
 }
 
 /** 创建报告（存结构化指标 + AI 总结 + 规划） */
@@ -768,9 +904,13 @@ export async function createReport(
     segmentId?: string;
     summary: string;
     plan: ReportPlan;
-  }
+  },
 ): Promise<Report> {
-  const tasks = await loadTasksInRange(userId, input.periodStart, input.periodEnd);
+  const tasks = await loadTasksInRange(
+    userId,
+    input.periodStart,
+    input.periodEnd,
+  );
   const metrics = computeMetrics(tasks);
   const [created] = await db
     .insert(reportTable)
@@ -802,7 +942,7 @@ export async function loadReports(userId: string): Promise<Report[]> {
 /** 按 id 查找报告 */
 export async function findReportById(
   userId: string,
-  id: string
+  id: string,
 ): Promise<Report | null> {
   const [row] = await db
     .select(REPORT_FIELDS)
@@ -815,7 +955,7 @@ export async function findReportById(
 export async function hasReportForPeriod(
   userId: string,
   type: ReportType,
-  periodEnd: string
+  periodEnd: string,
 ): Promise<boolean> {
   const [row] = await db
     .select({ id: reportTable.id })
@@ -824,8 +964,8 @@ export async function hasReportForPeriod(
       and(
         eq(reportTable.userId, userId),
         eq(reportTable.type, type),
-        eq(reportTable.periodEnd, periodEnd)
-      )
+        eq(reportTable.periodEnd, periodEnd),
+      ),
     )
     .limit(1);
   return !!row;
@@ -834,7 +974,7 @@ export async function hasReportForPeriod(
 /** 应用报告规划：批量创建 plan 中的任务，返回创建结果 */
 export async function applyReportPlan(
   userId: string,
-  reportId: string
+  reportId: string,
 ): Promise<Task[]> {
   const [row] = await db
     .select({ plan: reportTable.plan })
@@ -848,7 +988,7 @@ export async function applyReportPlan(
       importance: p.importance as Importance,
       category: p.category as Category,
       date: p.date,
-    }))
+    })),
   );
 }
 
@@ -858,7 +998,7 @@ export async function applyReportPlan(
 
 /** 读取用户偏好；数据库为 NULL 时返回默认值 */
 export async function getUserPreferences(
-  userId: string
+  userId: string,
 ): Promise<UserPreferences> {
   const [row] = await db
     .select({ preferences: userTable.preferences })
@@ -867,10 +1007,32 @@ export async function getUserPreferences(
   return row?.preferences ?? DEFAULT_PREFERENCES;
 }
 
+/**
+ * 读取用户偏好并解密所有模型配置中的 apiKey。
+ * 服务端业务层（agent / transcribe）应使用此函数；返回的 apiKey 是明文。
+ *
+ * 数据库中存储的是 "enc:" 前缀的密文，前端 GET /api/preferences
+ * 返回的也是密文（前端用相同 master key 自行解密显示）。
+ */
+export async function getUserPreferencesDecrypted(
+  userId: string,
+): Promise<UserPreferences> {
+  const prefs = await getUserPreferences(userId);
+  if (!prefs.models?.configs?.length) return prefs;
+  const { decryptForUser } = await import("@/lib/crypto");
+  const decrypted = await Promise.all(
+    prefs.models.configs.map(async (c) => ({
+      ...c,
+      apiKey: await decryptForUser(c.apiKey, userId),
+    })),
+  );
+  return { ...prefs, models: { ...prefs.models, configs: decrypted } };
+}
+
 /** 整体覆盖用户偏好（merge 由调用方用 mergePreferences 完成） */
 export async function updateUserPreferences(
   userId: string,
-  preferences: UserPreferences
+  preferences: UserPreferences,
 ): Promise<UserPreferences> {
   const [updated] = await db
     .update(userTable)
@@ -884,7 +1046,61 @@ export async function updateUserPreferences(
  *  同时清理 Blob Store 中的核心记忆文件。 */
 export async function deleteUser(userId: string): Promise<void> {
   // 先清理 Blob 中的核心记忆（账号删除后 userId 不再有效，无法再查）
-  const { deleteCoreMemory } = await import("@/lib/memory");
+  const { deleteCoreMemory } = await import("@/lib/ai/memory");
   await deleteCoreMemory(userId).catch(() => {});
   await db.delete(userTable).where(eq(userTable.id, userId));
 }
+
+/* ------------------------------------------------------------------ */
+/* 分组实例：把上面散装的函数按领域聚合，方便按实例导入使用             */
+/* ------------------------------------------------------------------ */
+
+export const taskQueries = {
+  loadByDate: loadTasksByDate,
+  loadDay: loadDayTasks,
+  findById: findTaskById,
+  findByIdAndDate: findTaskByIdAndDate,
+  insert: insertTask,
+  insertMany: insertTasks,
+  setDone: setTaskDone,
+  setTitle: setTaskTitle,
+  setDate: setTaskDate,
+  updateFields: updateTaskFields,
+  remove: removeTask,
+  loadInRange: loadTasksInRange,
+  getPastIncompleteData: getPastIncompleteTasksData,
+  loadAllTags: loadAllTags,
+  loadDueReminders: loadDueReminders,
+  markRemindersNotified: markRemindersNotified,
+};
+
+export const segmentQueries = {
+  load: loadSegments,
+  loadForDate: loadSegmentsForDate,
+  findById: findSegmentById,
+  create: createSegment,
+  update: updateSegment,
+};
+
+export const conversationQueries = {
+  getLatest: getLatestConversation,
+  save: saveConversation,
+  clear: clearConversations,
+  search: searchConversations,
+};
+
+export const reportQueries = {
+  load: loadReports,
+  create: createReport,
+  findById: findReportById,
+  hasForPeriod: hasReportForPeriod,
+  applyPlan: applyReportPlan,
+  computeMetrics: computeMetrics,
+};
+
+export const userQueries = {
+  getPreferences: getUserPreferences,
+  getPreferencesDecrypted: getUserPreferencesDecrypted,
+  updatePreferences: updateUserPreferences,
+  delete: deleteUser,
+};

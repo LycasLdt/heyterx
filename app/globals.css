@@ -128,3 +128,13 @@
     @apply font-sans;
   }
 }
+
+/* 思考中字符流动动画：渐变在文字上横向滚动 */
+@keyframes thinking-shimmer {
+  0% {
+    background-position: -200% center;
+  }
+  100% {
+    background-position: 200% center;
+  }
+}

@@ -1,11 +1,7 @@
 import { NextResponse } from "next/server";
 import type { UIMessage } from "ai";
 import { getSessionUser } from "@/lib/auth";
-import {
-  clearConversations,
-  getLatestConversation,
-  saveConversation,
-} from "@/lib/db/queries";
+import { conversationQueries } from "@/lib/db/queries";
 
 /** GET /api/conversations —— 返回用户最近一次对话的 messages，没有则返回 null */
 export async function GET() {
@@ -13,7 +9,7 @@ export async function GET() {
   if (!user) {
     return new Response("Unauthorized", { status: 401 });
   }
-  const conversation = await getLatestConversation(user.id);
+  const conversation = await conversationQueries.getLatest(user.id);
   return NextResponse.json({ conversation });
 }
 
@@ -29,7 +25,7 @@ export async function POST(req: Request) {
     messages: UIMessage[];
   };
 
-  const savedId = await saveConversation(user.id, { id, messages });
+  const savedId = await conversationQueries.save(user.id, { id, messages });
   return NextResponse.json({ id: savedId });
 }
 
@@ -39,6 +35,6 @@ export async function DELETE() {
   if (!user) {
     return new Response("Unauthorized", { status: 401 });
   }
-  await clearConversations(user.id);
+  await conversationQueries.clear(user.id);
   return NextResponse.json({ ok: true });
 }
