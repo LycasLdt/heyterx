@@ -85,9 +85,9 @@ function summarizeToolOutput(
   }
   // getPastIncompleteTasks
   if ("pastIncomplete" in value && Array.isArray(value.pastIncomplete)) {
-    const fc = value.futureCounts as Record<string, number> | undefined;
+    const fd = value.futureDays as unknown[] | undefined;
     return `（已压缩：${value.pastIncomplete.length} 项过去未完成任务${
-      fc ? `，${Object.keys(fc).length} 天未来计数` : ""
+      fd ? `，${fd.length} 天未来计数` : ""
     }）`;
   }
   // 任务段列表（createTaskSegment/updateTaskSegment）

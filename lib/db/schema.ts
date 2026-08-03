@@ -1,4 +1,12 @@
-import { boolean, date, jsonb, pgTable, text, timestamp } from "drizzle-orm/pg-core";
+import {
+  boolean,
+  date,
+  jsonb,
+  pgTable,
+  text,
+  timestamp,
+  type AnyPgColumn,
+} from "drizzle-orm/pg-core";
 import { randomUUID } from "node:crypto";
 import type { UIMessage } from "ai";
 
@@ -192,11 +200,17 @@ export const task = pgTable("task", {
   // 五育分类（德/智/体/美/劳），取值见 queries.ts 的 CATEGORY_VALUES
   category: text("category").notNull().default("智育"),
   // 所属任务段 id（可选），关联 taskSegment，删除段时置 null
+  // 任务段相当于任务树的根节点，段内任务默认是一级子节点
   segmentId: text("segment_id").references(() => taskSegment.id, {
     onDelete: "set null",
   }),
-  // 自定义标签数组（自由输入，系统自动收集所有用过的标签供筛选）
-  tags: text("tags").array().notNull().default([]),
+  // 母节点 id（可选），自引用 task.id 形成任务树；删除母节点时子节点级联删除
+  // 为 null 表示一级子节点（既有任务默认全部为一级子节点）
+  parentId: text("parent_id").references((): AnyPgColumn => task.id, {
+    onDelete: "cascade",
+  }),
+  // 节点元数据（可选 JSON 对象），如 {"index": 4} 标注兄弟节点间的顺序（「第4练」→ 4）
+  metadata: jsonb("metadata").$type<Record<string, unknown>>(),
   // 提醒时间（可选，ISO 字符串）；到点由 Service Worker 触发浏览器通知
   reminderAt: timestamp("reminder_at", { withTimezone: true }),
   // 提醒是否已触发（避免重复通知）；触发后置 true

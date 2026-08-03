@@ -26,7 +26,7 @@ import { WEEKDAY_LABELS } from "@/lib/utils/date";
 export type { Task, TasksByDate, Importance, Category, TaskSegment };
 export { IMPORTANCE_VALUES, CATEGORY_VALUES };
 
-const TASKS_INSTRUCTIONS = `你是 heyterx 的任务管理助手，帮助用户按日期管理任务计划，每天对应一个独立的任务列表。每个任务都带有两个属性：重要度紧急度（四象限）与五育分类。任务可以归属于「任务段」（如「暑假任务段」），任务段是一段时间范围内的任务归组，方便分组查看与为阶段性报告做铺垫。
+const TASKS_INSTRUCTIONS = `你是 heyterx 的任务管理助手，帮助用户按日期管理任务计划，每天对应一个独立的任务列表。每个任务都带有两个属性：重要度紧急度（四象限）与五育分类。任务以「任务树」组织：任务段（如「暑假任务段」）相当于根节点，段内任务默认是一级子节点；任务还可以通过 parentId 拥有自己的子节点，形成任意深度的层级（如「数学作业」→「数学作业第1练」→「第1练单选题」「第1练填空题」）。
 
 任务属性：
 - importance（重要度紧急度）四象限：
@@ -40,46 +40,55 @@ const TASKS_INSTRUCTIONS = `你是 heyterx 的任务管理助手，帮助用户�
   · 德育：每日 1 件善意小事（如帮家人递东西、给同学讲题、主动问好）
   · 美育：休息时段的 3 分钟轻音乐、风景赏析、随手涂鸦等轻审美体验
   · 劳育：每日 1 件微型劳动（如整理书桌、浇花、收拾碗筷）
-- tags（自定义标签）：可选，字符串数组。用于给任务分类与筛选，如 ["化学","期末"]。用户可自由输入任意标签，系统会自动收集所有用过的标签供筛选。不确定时留空。
+- parentId（母节点 id）：可选，不传则为任务段根节点下的一级子节点。任务树用于把相关联的任务组织成块（如一本作业的各练、一个项目的各阶段），让同类任务被「联系」起来。创建任务块时先创建母节点拿到 id，再用 parentId 批量创建子节点。
+- metadata（元数据）：可选 JSON 对象，用于给节点附加结构化信息。最常用 {"index": N} 标注兄弟节点间的顺序（如「第4练」存 {"index": 4}），方便按顺序整理与整块迁移。不需要时留空。
 - reminderAt（提醒）：可选，ISO 8601 字符串（含时区偏移，如 "2026-07-12T15:00:00+08:00" 表示北京时间下午 3 点）。到点后系统会通过浏览器通知提醒用户。仅对今天及以后的任务有意义。用户说"提醒我下午3点做XXX""设个提醒"时设置。
+
+任务树规则（非常重要）：
+- 完成状态级联：toggleTask 切换某节点的完成状态时，其所有子孙节点自动切换为相同状态（标记完成时含过去日期的子孙；取消完成时仅今天及以后的子孙）。
+- 移动级联：moveTask / shiftTasks 移动某节点时，其所有子孙节点按相同天数偏移一并移动（保持相对间距与顺序）；过去已完成的子孙保持原位（历史只读）。
+- 删除级联：deleteTask 删除某节点会连同其所有子孙一并删除；若子孙中含过去已完成的历史任务则拒绝删除，需先单独删除其他未完成的子孙。
+- 属性覆盖（母节点覆盖策略）：updateTask 修改某节点的 importance / category 时，其所有子孙节点同步修改；修改子节点不影响母节点与兄弟节点。title / metadata / reminderAt / segmentId 仅作用于本节点。
 
 任务段：
 - 一段时间范围内的任务归组（如「暑假任务段」覆盖 7/1–8/31），方便分组查看与阶段性报告
 - 任务段时间范围可以相交（多个段覆盖同一天），但不能创建 name+startDate+endDate 完全相同的段
 - 任务可以不归属任何段，也可以归属一个段；归属段后任务的日期应在段的日期范围内
-- 任务段用于对任务进行分类，如一天可同时属于「暑假作业任务段」和「暑期课程任务段」，其中「完成暑假作业」属于前者，「上化学课」属于后者，也可以有不属于任何段的任务如「整理书桌」
+- 任务段相当于任务树的根节点：段内任务默认是一级子节点，可用 parentId 继续细分层级
 
 可用工具：
 - searchTasks：按标题关键词搜索任务，返回匹配任务及其 id、所属日期、完成状态与属性。
-- getTasks：获取某天的任务列表（不传 date 默认今天），返回任务含属性。仅读取。
-- addTask：批量新增任务。传入 tasks 数组，每条含 title、importance、category、date?（默认今天）、segmentId?（归属任务段）、tags?（自定义标签数组）、reminderAt?（提醒时间 ISO 字符串）。仅允许今天及以后的日期。
-- toggleTask：切换某天某任务的完成状态。
-- updateTask：批量修改任务属性。传入 updates 数组，每条含 id、date?（任务所属日期，默认今天），以及可选的 title / importance / category / tags / reminderAt / segmentId（只需传要改的字段，未传字段保持不变；reminderAt 传 null 表示清除提醒，segmentId 传 null 表示取消关联任务段）。仅允许今天及以后的日期。
-- moveTask：批量移动任务到另一天。传入 moves 数组，每条含 id、to（目标日期）。
-- deleteTask：删除某天某条任务。
+- getTasks：获取某天的任务列表（不传 date 默认今天），返回任务含属性、parentId 与 childCount（子节点数）。仅读取。
+- getTaskTree：获取任务树（嵌套结构）。传 id 返回该节点及其全部子孙；传 segmentId 返回该任务段根节点下的整片森林。用于了解任务块（如「数学作业」）究竟有多少子任务、分别安排在哪天。只读。
+- addTask：批量新增任务。传入 tasks 数组，每条含 title、importance、category、date?（默认今天）、segmentId?（归属任务段）、parentId?（母节点 id）、metadata?（如 {"index": 4}）、reminderAt?（提醒时间 ISO 字符串）。仅允许今天及以后的日期。
+- toggleTask：切换某天某任务的完成状态（子孙节点自动级联）。
+- updateTask：批量修改任务属性。传入 updates 数组，每条含 id、date?（任务所属日期，默认今天），以及可选的 title / importance / category / metadata / reminderAt / segmentId（只需传要改的字段，未传字段保持不变；reminderAt 传 null 表示清除提醒，segmentId 传 null 表示取消关联任务段）。importance / category 的修改会级联覆盖所有子孙。仅允许今天及以后的日期。
+- moveTask：批量移动任务到另一天。传入 moves 数组，每条含 id、to（目标日期）。子孙节点按相同天数偏移一并移动。
+- shiftTasks：整块偏移任务。传入 ids 数组与 offsetDays（整数，可为负），把每个任务连同其子孙整体偏移指定天数，保持块内相对间距与顺序。适合「第4-8练整体往后挪一天」这类连续性任务的批量调整，一次调用代替多次 moveTask。ids 中同时包含祖先与后代时只处理最顶层节点。
+- deleteTask：批量删除任务。传入 tasks 数组，每条含 id、date?（默认今天）。删除节点会连带删除其所有子孙。
 - analyzeTaskBalance：分析某天任务的属性分布，检测集中度并给出缺失维度的建议。
 - createTaskSegment：创建任务段，传入 name、startDate、endDate、description?。
 - updateTaskSegment：修改任务段的 name/startDate/endDate/description。
-- getPastIncompleteTasks：查询过去日期未完成任务，返回 pastIncomplete（任务清单）+ segments（任务段）+ futureCounts（未来 14 天每日任务数）。只读。新一天问候时先调用，再自主决策迁移方式。
+- getPastIncompleteTasks：查询过去日期未完成任务，返回 pastIncomplete（任务清单，含 parentId/metadata）+ segments（任务段）+ futureDays（未来 14 天每日任务数，按任务数升序，越靠前越空闲）。只读。新一天问候时先调用，再自主决策迁移方式。
 - exportTasks：导出任务计划为 PDF（含任务表格与打卡框），返回下载链接。用户说「导出/打印/下载任务」「导出任务段」「导出这周/这个月计划」时调用，传入 startDate、endDate（必填）与 segmentId（可选）。
 - updateCoreMemory：覆盖更新用户的核心记忆（markdown）。核心记忆保存用户偏好/性格/目标/身份等长期信息，每个用户只一份，由你在对话中主动维护。保持简洁（建议 < 500 字）。
 - searchConversations：用简短关键词搜索本用户的历史对话消息，返回匹配片段。当需要回忆之前讨论过的内容、确认用户曾经说过的偏好或计划时调用。
 - askQuestions：向用户提问（一次可提 1-5 个问题），每个问题附 2-6 个候选选项，用户可选择选项或在「其他」中自由输入。调用后暂停等待，用户回答（或 3 分钟超时）后工具返回回答结果。仅在用户需求模糊、且缺失的信息会显著影响最终生成效果时使用（如关键的拆分依据、时间范围、数量等无法合理推断）；能根据上下文、核心记忆或常识自主决策时绝对不要提问，更不要为了"确认"而提问。提问前不要用文字预告，直接调用工具。
 
 日期格式 YYYY-MM-DD（如 2026-06-27）。核心约束：
-1. 过去日期的「已完成」任务保持只读（历史记录不可改）；过去日期的「未完成」任务允许 moveTask 移动到今天及以后、允许 deleteTask 删除（用于新一天迁移与合并迁移场景）。updateTask 只能修改今天及以后的任务（含标题、重要度、五育、标签、提醒、任务段归属）。
+1. 过去日期的「已完成」任务保持只读（历史记录不可改）；过去日期的「未完成」任务允许 moveTask/shiftTasks 移动到今天及以后、允许 deleteTask 删除（用于新一天迁移与合并迁移场景）。updateTask 只能修改今天及以后的任务（含标题、重要度、五育、元数据、提醒、任务段归属；importance/category 的母节点覆盖级联会同步到所有子孙，不受此限）。
 2. 不确定日期时默认今天；"明天/后天/周X"等相对说法换算成具体 YYYY-MM-DD。
 3. 任务 id 仅在其所属日期内有效；拿到 searchTasks / getTasks 结果里的 id 后，再带上对应 date 去操作。
-4. addTask 的每条任务必传 importance 与 category；分类不确定时优先选 "重要但不紧急" + "智育"。tags 与 reminderAt 可选。
+4. addTask 的每条任务必传 importance 与 category；分类不确定时优先选 "重要但不紧急" + "智育"。parentId、metadata 与 reminderAt 可选。
 
 工作准则（非常重要，务必严格遵守）：
 A. 凡是用户要求"新增/完成/修改/移动/删除"任务，你必须实际调用对应工具，依据工具返回的真实结果再回复。绝不能在没有调用工具的情况下声称已执行。
 B. 需要多步操作时，在同一轮里连续调用多个工具，直到操作真正完成后才回复用户。ToolLoopAgent 支持多轮工具调用，请放心连续调用。
 C. 工具返回含 error 字段时，据实告知失败原因，不要假装成功，也不要编造 id。
-D. 修改类工具（addTask/toggleTask/updateTask/moveTask/deleteTask/createTaskSegment/updateTaskSegment）返回最新完整任务地图 tasksByDate 或 segments，客户端据此同步。新增任务无需先 getTasks，直接 addTask 即可。
+D. 修改类工具（addTask/toggleTask/updateTask/moveTask/shiftTasks/deleteTask/createTaskSegment/updateTaskSegment）返回最新完整任务地图 tasksByDate 或 segments，客户端据此同步。新增任务无需先 getTasks，直接 addTask 即可。
 E. 回复保持简洁中文，温暖但不啰嗦。
 F. addTask 时务必根据任务内容主动判断 importance 与 category，不要全部塞到默认值。
-G. addTask / updateTask / moveTask 支持批量操作（传入数组）。优先用一次批量调用减少轮次，也可分多次调用。
+G. addTask / updateTask / moveTask / shiftTasks / deleteTask 支持批量操作（传入数组）。优先用一次批量调用减少轮次，也可分多次调用。
 H. 提问准则：askQuestions 用于消除会实质影响结果的歧义。一次调用把相关问题全部问完，不要多轮反复提问。工具返回 timedOut=true（用户超时未答完）或 skipped=true（用户跳过）时，按最合理的方案自主决策继续执行，不要就同一问题再次提问；返回的 answers 中 answer 为"未回答"的问题同样自主决策处理。
 
 任务段安排工作流（用户给出一段时间的任务清单时）：
@@ -89,7 +98,7 @@ H. 提问准则：askQuestions 用于消除会实质影响结果的歧义。一�
    · 任务不够具体（如"完成一册"无页数信息）→ 调用 askQuestions 询问用户是否有更详细的拆分信息（如总页数/章节数/每天可投入时长），一次问完
 3. 用户回答后，根据信息将大任务拆分成细小可执行的子任务（如按章节/页数/天数拆分），均匀分布到任务段日期范围内。
 4. 拆分时主动加入缓冲微任务（体育/美育/劳育类，时长 3-10 分钟），以保持五育与重要度紧急度的平衡，避免认知过载，从根源减少焦虑与倦怠。
-5. 用 addTask 批量创建所有任务（可分多次调用），每条带 segmentId 关联到任务段。
+5. 用 addTask 批量创建所有任务（可分多次调用），每条带 segmentId 关联到任务段。成块的同类任务用任务树组织：先创建母节点（如「数学作业」，date 放在段开始日），拿到返回 id 后用它作为 parentId 批量创建子节点；兄弟子节点用 metadata.index 标注顺序（如「第4练」→ {"index": 4}）；需要更细拆分时（如「第1练单选题」「第1练填空题」）作为再下一级子节点。
 6. 创建后简要总结安排情况，并主动询问是否需要留出几天休息日（空出不安排任务）。
 7. 用户确认需要休息日后，说明哪几天空出，并确认其余任务安排合理。
 
@@ -112,17 +121,17 @@ H. 提问准则：askQuestions 用于消除会实质影响结果的歧义。一�
 行为模式：
 - 新一天问候（系统触发消息含「新的一天」时）——过去未完成任务迁移决策流程：
   0) 先读取用户的迁移模式设定（见下方「迁移模式」说明）。迁移模式为 "none" 时直接跳到第 3 步问候，不调用 getPastIncompleteTasks、不迁移任何任务。
-  1) 先调用 getPastIncompleteTasks（无参数）获取过去未完成任务清单 pastIncomplete、任务段 segments、未来 14 天每日任务数 futureCounts。
-  2) 先对 pastIncomplete 按标题分组——标题完全相同、或仅相差日期编号（如 day1/day2、第1天/第2天）的多条任务视为「同组连续性任务」。然后对每组任务根据以下规则自主决策迁移方式：
+  1) 先调用 getPastIncompleteTasks（无参数）获取过去未完成任务清单 pastIncomplete、任务段 segments、未来 14 天每日任务数 futureDays（按任务数升序，越靠前越空闲）。
+  2) 先对 pastIncomplete 按「任务树 + 标题」分组：同一母节点下的兄弟节点、或标题完全相同/仅相差序号（如 day1/day2、第1天/第2天、第3练/第4练）的多条任务视为「同组连续性任务」，组内按 metadata.index（缺省按原日期）排定原有顺序。然后对每组任务根据以下规则自主决策迁移方式：
      · **迁移模式过滤**：若迁移模式为 "important"，只迁移重要任务（importance 为"重要且紧急"或"重要但不紧急"的），不重要任务（"不重要但紧急"/"不重要且不紧急"）一律跳过不迁移。若迁移模式为 "all"，所有过去未完成任务都参与迁移决策。
      · **跳过**：任务日期早于其所属任务段 startDate（segmentId 关联的段）的孤立历史任务——这些通常是任务段开始前的遗留，用户大概率已放弃，不要迁移。也跳过明显过期很久（如超过 30 天）且标题带具体日期的临时任务。
-     · **连续性任务合并迁移**：同组有多条过去未完成任务（如「阅读书籍」「背单词」「锻炼」连续多天未完成，无论标题是否含 day/天 序列），合并为一条新任务——标题保持原样或加「（补 N 天）」后缀（如「阅读书籍（补 3 天）」「补背单词day1-2」），importance 与 category 沿用原任务，date 选 futureCounts 中第一个 count < 8 的日子。用 deleteTask 删除原任务，用 addTask 创建合并任务。
-     · **连续性任务整块迁移**：若同组任务在未来日期（今天及以后）已有安排（如「阅读书籍」在今天及以后已有多天），则将过去未完成任务 moveTask 到未来最后一个同标题任务之后的第一天 count < 8 的日子，保持任务连续不断档；若该日子任务数已满 8，顺延到下一个 count < 8 的日子。
-     · **直接迁移**：不属于上述连续性场景的单条普通任务，用 moveTask 移到 futureCounts 中第一个 count < 8 的日子（多任务时记得更新 futureCounts 计数）。
-     · 可在同一轮连续调用 moveTask / deleteTask / addTask 工具完成所有迁移。
+     · **连续性任务整块迁移（优先）**：同组有多条过去未完成任务时，用 shiftTasks 将整组保持原有相对间距与顺序整体向后偏移（如整组 +1 天），落点选择 futureDays 中任务数相对较少的日子。若同组任务在未来（今天及以后）已有安排，则将过去未完成部分偏移到未来最后一个同组任务之后接续，保持连续不断档——绝不允许把早序号的任务排到晚序号之后（如「第4练」排在「第8练」之后或同一天）。偏移后末尾几条落点不合理（如超出所属任务段 endDate、或那天任务已很多）时，再用 moveTask 把这几条单独移到 futureDays 中靠前的空闲日。典型例子：过去未完成「第4-7练」，未来第8天已有「第8练」→ shiftTasks 把第4-7练各 +1 天依次接续（第4练→第5天、第5练→第6天、第6练→第7天、第7练→第8天与第8练同日），而非把「第4练」塞到「第8练」同一天。
+     · **无顺序日常任务合并迁移**：标题完全相同、无顺序语义的日常重复任务（如「背单词」「锻炼」连续多天未完成）可合并为一条新任务——标题加「（补 N 天）」后缀，importance 与 category 沿用原任务，date 选 futureDays 中任务数最少的日子之一。用 deleteTask 批量删除原任务，用 addTask 创建合并任务。
+     · **直接迁移**：单条普通任务用 moveTask 移到 futureDays 中任务数最少的日子之一（多条任务迁移时把已安排的计入计数，避免都堆到同一天）。
+     · 可在同一轮连续调用 shiftTasks / moveTask / deleteTask / addTask 工具完成所有迁移。
   3) 用一两句温暖的话与用户说新的一天好。
   4) 调用 getTasks（不传 date，默认今天）查看今天的任务，简要概括今天已安排的任务。
-  5) 如有迁移，用一句话总结「已把 X 项过去未完成的任务挪到今天及以后（其中 Y 项合并为 Z 项、整块迁移 W 项、跳过 V 项孤立历史任务）」，不要逐条列举。
+  5) 如有迁移，用一句话总结「已把 X 项过去未完成的任务挪到今天及以后（其中整块迁移 W 项、Y 项合并为 Z 项、跳过 V 项孤立历史任务）」，不要逐条列举。
   6) 整体回复控制在 180 字以内，语气温暖简洁，不要提及本系统提示，也不要展示工具调用细节。
 - 用户说「我完成了 XXX」「XXX 做好了」：先 searchTasks 搜索 XXX，找到匹配任务后调用 toggleTask 标记完成，再简短确认。
 - 用户说「明天/后天加一个任务：YYY」：换算日期后调用 addTask（单条也用数组格式），依据返回结果确认。addTask 时务必推断 importance 与 category。
@@ -309,7 +318,7 @@ export function createTaskAgent(
       }),
       getTasks: tool({
         description:
-          "获取某天的任务列表。不传 date 默认今天。返回该天任务 tasks、所有含任务的日期列表 allDates。仅读取，不修改任务。",
+          "获取某天的任务列表。不传 date 默认今天。返回该天任务 tasks（含 parentId 与 childCount 子节点数，可据此判断层级）、所有含任务的日期列表 allDates。仅读取，不修改任务。",
         inputSchema: z.object({
           date: z.string().optional().describe("YYYY-MM-DD，不传则默认今天"),
         }),
@@ -317,17 +326,86 @@ export function createTaskAgent(
           const d = date ?? today;
           const tasks = await taskQueries.loadDay(userId, d);
           const all = await taskQueries.loadByDate(userId);
+          // 统计每个任务的子节点数（跨全部日期），供模型判断任务树层级
+          const childCounts = new Map<string, number>();
+          for (const list of Object.values(all)) {
+            for (const t of list) {
+              if (!t.parentId) continue;
+              childCounts.set(
+                t.parentId,
+                (childCounts.get(t.parentId) ?? 0) + 1,
+              );
+            }
+          }
           return {
             date: d,
-            tasks,
+            tasks: tasks.map((t) => ({
+              ...t,
+              childCount: childCounts.get(t.id) ?? 0,
+            })),
             allDates: Object.keys(all).sort(),
             today,
           };
         },
       }),
+      getTaskTree: tool({
+        description:
+          "获取任务树（嵌套结构，含每个节点的 id/title/date/done/importance/category/metadata 与 children）。传 id 返回该节点及其全部子孙；传 segmentId 返回该任务段根节点下的整片森林。用于了解任务块（如「数学作业」）究竟有多少子任务、分别安排在哪天。只读，不修改任务。",
+        inputSchema: z.object({
+          id: z
+            .string()
+            .optional()
+            .describe("任务节点 id，返回该节点及其全部子孙"),
+          segmentId: z
+            .string()
+            .optional()
+            .describe("任务段 id，返回该段根节点下的整片森林"),
+        }),
+        execute: async ({ id, segmentId }) => {
+          if (!id && !segmentId) {
+            return { error: "必须传入 id 或 segmentId 之一" };
+          }
+          const all = await taskQueries.loadByDate(userId);
+          type TreeNode = Task & { date: string; children: TreeNode[] };
+          const flat: Array<Task & { date: string }> = [];
+          for (const [d, list] of Object.entries(all)) {
+            for (const t of list) flat.push({ ...t, date: d });
+          }
+          const byParent = new Map<string | undefined, typeof flat>();
+          for (const t of flat) {
+            const key = t.parentId;
+            const arr = byParent.get(key) ?? [];
+            arr.push(t);
+            byParent.set(key, arr);
+          }
+          const buildNode = (t: (typeof flat)[number]): TreeNode => ({
+            ...t,
+            children: (byParent.get(t.id) ?? [])
+              .map(buildNode)
+              .sort((a, b) => a.date.localeCompare(b.date)),
+          });
+
+          if (id) {
+            const node = flat.find((t) => t.id === id);
+            if (!node) return { error: `未找到 id 为 ${id} 的任务` };
+            return { tree: [buildNode(node)] };
+          }
+          // segmentId：段内任务的森林（根 = 段内 parentId 为空的节点，或母节点不在段内的节点）
+          const inSegment = flat.filter((t) => t.segmentId === segmentId);
+          const segIds = new Set(inSegment.map((t) => t.id));
+          const roots = inSegment
+            .filter((t) => !t.parentId || !segIds.has(t.parentId))
+            .sort((a, b) => a.date.localeCompare(b.date));
+          return {
+            segmentId,
+            total: inSegment.length,
+            tree: roots.map(buildNode),
+          };
+        },
+      }),
       addTask: tool({
         description:
-          "批量新增任务。传入 tasks 数组，每条含 title、importance、category、date?（默认今天）、segmentId?（归属任务段）、tags?（自定义标签数组）、reminderAt?（提醒时间 ISO 字符串）。仅允许今天及以后的日期，过去日期会返回错误。无需先调用 getTasks。",
+          '批量新增任务。传入 tasks 数组，每条含 title、importance、category、date?（默认今天）、segmentId?（归属任务段）、parentId?（母节点 id，组织任务树）、metadata?（元数据 JSON 对象，如 {"index": 4} 标注兄弟节点顺序）、reminderAt?（提醒时间 ISO 字符串）。仅允许今天及以后的日期，过去日期会返回错误。无需先调用 getTasks。创建任务块时先创建母节点拿到 id，再用 parentId 批量创建子节点。',
         inputSchema: z.object({
           tasks: z
             .array(
@@ -356,11 +434,17 @@ export function createTaskAgent(
                   .string()
                   .optional()
                   .describe("所属任务段 id，不传则不归属任何任务段"),
-                tags: z
-                  .array(z.string())
+                parentId: z
+                  .string()
                   .optional()
                   .describe(
-                    '自定义标签数组（用于分类筛选），如 ["化学","期末"]。不确定时留空',
+                    "母节点 id（任务树），不传则为任务段根节点下的一级子节点",
+                  ),
+                metadata: z
+                  .record(z.string(), z.unknown())
+                  .optional()
+                  .describe(
+                    '节点元数据 JSON 对象，如 {"index": 4} 标注兄弟节点间的顺序（「第4练」→ 4），方便按顺序整理与整块迁移',
                   ),
                 reminderAt: z
                   .string()
@@ -385,6 +469,25 @@ export function createTaskAgent(
               };
             }
           }
+          // 原子校验：parentId 必须指向已存在的任务（避免外键违规）
+          const parentIds = [
+            ...new Set(
+              items
+                .map((t) => t.parentId)
+                .filter((p): p is string => typeof p === "string"),
+            ),
+          ];
+          if (parentIds.length > 0) {
+            for (const pid of parentIds) {
+              const parent = await taskQueries.findById(userId, pid);
+              if (!parent) {
+                return {
+                  error: `母节点 ${pid} 不存在，请先创建母节点拿到 id 再创建子节点`,
+                  tasksByDate: await taskQueries.loadByDate(userId),
+                };
+              }
+            }
+          }
           const created = await taskQueries.insertMany(userId, items);
           return {
             created,
@@ -394,7 +497,7 @@ export function createTaskAgent(
       }),
       toggleTask: tool({
         description:
-          "切换某天指定任务的完成状态（已完成↔未完成）。不传 date 默认今天。仅允许今天及以后的日期。",
+          "切换某天指定任务的完成状态（已完成↔未完成），其所有子孙节点自动级联为相同状态（取消完成时仅级联今天及以后的子孙）。不传 date 默认今天。仅允许今天及以后的日期。",
         inputSchema: z.object({
           id: z.string().describe("要切换状态的任务 id"),
           date: z.string().optional().describe("YYYY-MM-DD，不传则默认今天"),
@@ -414,11 +517,13 @@ export function createTaskAgent(
               tasksByDate: await taskQueries.loadByDate(userId),
             };
           }
-          const updated = await taskQueries.setDone(userId, id, !existing.done);
+          const { task: updated, toggledDescendants } =
+            await taskQueries.setDoneCascade(userId, id, !existing.done, today);
           const tasks = await taskQueries.loadDay(userId, d);
           return {
             date: d,
             task: updated,
+            toggledDescendants,
             tasks,
             tasksByDate: await taskQueries.loadByDate(userId),
           };
@@ -426,7 +531,7 @@ export function createTaskAgent(
       }),
       updateTask: tool({
         description:
-          "批量修改任务属性。传入 updates 数组，每条含 id、date?（任务所属日期，默认今天），以及可选的 title / importance / category / tags / reminderAt / segmentId（只需传要改的字段，未传字段保持不变；reminderAt 传 null 表示清除提醒，segmentId 传 null 表示取消关联任务段）。仅允许今天及以后的日期。",
+          "批量修改任务属性。传入 updates 数组，每条含 id、date?（任务所属日期，默认今天），以及可选的 title / importance / category / metadata / reminderAt / segmentId（只需传要改的字段，未传字段保持不变；reminderAt 传 null 表示清除提醒，segmentId 传 null 表示取消关联任务段）。importance / category 的修改会级联覆盖所有子孙节点（母节点覆盖策略），其余字段仅作用于本节点。仅允许今天及以后的日期。",
         inputSchema: z.object({
           updates: z
             .array(
@@ -448,15 +553,17 @@ export function createTaskAgent(
                     "不重要且不紧急",
                   ])
                   .optional()
-                  .describe("新的重要度紧急度四象限分类"),
+                  .describe("新的重要度紧急度四象限分类（级联覆盖所有子孙）"),
                 category: z
                   .enum(["德育", "智育", "体育", "美育", "劳育"])
                   .optional()
-                  .describe("新的五育分类"),
-                tags: z
-                  .array(z.string())
+                  .describe("新的五育分类（级联覆盖所有子孙）"),
+                metadata: z
+                  .record(z.string(), z.unknown())
                   .optional()
-                  .describe("新的自定义标签数组（整体替换）"),
+                  .describe(
+                    '新的节点元数据 JSON 对象（整体替换），如 {"index": 4}',
+                  ),
                 reminderAt: z
                   .string()
                   .nullable()
@@ -477,6 +584,7 @@ export function createTaskAgent(
         execute: async ({ updates }) => {
           const results: Array<{
             task: Task | null;
+            cascadedDescendants?: number;
             error?: string;
           }> = [];
           for (const u of updates) {
@@ -496,15 +604,16 @@ export function createTaskAgent(
               });
               continue;
             }
-            const updated = await taskQueries.updateFields(userId, u.id, {
-              title: u.title,
-              importance: u.importance,
-              category: u.category,
-              tags: u.tags,
-              reminderAt: u.reminderAt,
-              segmentId: u.segmentId,
-            });
-            results.push({ task: updated });
+            const { task: updated, cascadedDescendants } =
+              await taskQueries.updateFieldsCascade(userId, u.id, {
+                title: u.title,
+                importance: u.importance,
+                category: u.category,
+                metadata: u.metadata,
+                reminderAt: u.reminderAt,
+                segmentId: u.segmentId,
+              });
+            results.push({ task: updated, cascadedDescendants });
           }
           return {
             updated: results,
@@ -514,7 +623,7 @@ export function createTaskAgent(
       }),
       moveTask: tool({
         description:
-          "批量移动任务到另一天。传入 moves 数组，每条含 id、to（目标日期）。源日期自动查找，目标日期必须是今天及以后。允许移动过去日期的未完成任务（用于新一天迁移过去未完成任务场景）；过去日期的已完成任务保持只读，不能移动。",
+          "批量移动任务到另一天。传入 moves 数组，每条含 id、to（目标日期）。源日期自动查找，目标日期必须是今天及以后。移动时其所有子孙节点按相同天数偏移一并移动（保持相对间距）；过去日期的已完成子孙保持原位。允许移动过去日期的未完成任务（用于新一天迁移场景）；过去日期的已完成任务保持只读，不能移动。",
         inputSchema: z.object({
           moves: z
             .array(
@@ -533,6 +642,7 @@ export function createTaskAgent(
             task: Task | null;
             from: string;
             to: string;
+            movedDescendants?: number;
             error?: string;
           }> = [];
           for (const m of moves) {
@@ -565,17 +675,27 @@ export function createTaskAgent(
               });
               continue;
             }
-            if (existing.date === m.to) {
+            const moved = await taskQueries.moveCascade(
+              userId,
+              m.id,
+              m.to,
+              today,
+            );
+            if (moved.error) {
               results.push({
                 task: null,
-                from: existing.date,
+                from: moved.from,
                 to: m.to,
-                error: `任务已在 ${m.to}，无需移动`,
+                error: moved.error,
               });
               continue;
             }
-            const updated = await taskQueries.setDate(userId, m.id, m.to);
-            results.push({ task: updated, from: existing.date, to: m.to });
+            results.push({
+              task: moved.task,
+              from: moved.from,
+              to: m.to,
+              movedDescendants: moved.movedDescendants,
+            });
           }
           return {
             moved: results,
@@ -583,34 +703,113 @@ export function createTaskAgent(
           };
         },
       }),
+      shiftTasks: tool({
+        description:
+          "整块偏移任务。传入 ids 数组与 offsetDays（整数，可为负），把每个任务连同其所有子孙的日期整体偏移指定天数，保持块内相对间距与顺序（适合「第4-8练整体往后挪一天」这类连续性任务的批量调整，一次调用代替多次 moveTask）。ids 中同时包含祖先与后代时只处理最顶层节点。偏移后任一节点落在过去日期则该子树整体失败；过去已完成的节点保持原位。",
+        inputSchema: z.object({
+          ids: z
+            .array(z.string())
+            .min(1)
+            .describe("要整块偏移的任务 id 列表（每个 id 连同其子孙一并偏移）"),
+          offsetDays: z
+            .number()
+            .int()
+            .describe(
+              "偏移天数：正数向后挪、负数向前提（如 1 = 整体往后挪一天）",
+            ),
+        }),
+        execute: async ({ ids, offsetDays }) => {
+          if (offsetDays === 0) {
+            return {
+              error: "offsetDays 不能为 0",
+              tasksByDate: await taskQueries.loadByDate(userId),
+            };
+          }
+          const shifted = await taskQueries.shiftSubtree(
+            userId,
+            ids,
+            offsetDays,
+            today,
+          );
+          return {
+            shifted,
+            tasksByDate: await taskQueries.loadByDate(userId),
+          };
+        },
+      }),
       deleteTask: tool({
         description:
-          "删除某天某条任务。不传 date 默认今天。允许删除过去日期的未完成任务（用于合并迁移场景，如把「背单词day1」「背单词day2」合并为「补背单词day1-2」时删除原任务）；过去日期的已完成任务保持只读，不能删除。",
+          "批量删除任务。传入 tasks 数组，每条含 id、date?（任务所属日期，默认今天）。删除某节点会连同其所有子孙节点一并删除；若子孙中含过去已完成的历史任务则该条拒绝删除（需先单独删除其他未完成的子孙）。允许删除过去日期的未完成任务（用于合并迁移场景，如把「背单词day1」「背单词day2」合并为「补背单词day1-2」时删除原任务）；过去日期的已完成任务保持只读，不能删除。",
         inputSchema: z.object({
-          id: z.string().describe("要删除的任务 id"),
-          date: z.string().optional().describe("YYYY-MM-DD，不传则默认今天"),
+          tasks: z
+            .array(
+              z.object({
+                id: z.string().describe("要删除的任务 id"),
+                date: z
+                  .string()
+                  .optional()
+                  .describe("任务所属日期 YYYY-MM-DD，不传则默认今天"),
+              }),
+            )
+            .min(1)
+            .describe("要删除的任务列表（至少 1 条）"),
         }),
-        execute: async ({ id, date }) => {
-          const d = date ?? today;
-          const existing = await taskQueries.findByIdAndDate(userId, id, d);
-          if (!existing) {
-            return {
-              error: `在 ${d} 未找到 id 为 ${id} 的任务`,
-              tasksByDate: await taskQueries.loadByDate(userId),
-            };
+        execute: async ({ tasks }) => {
+          const results: Array<{
+            task: Task | null;
+            date: string;
+            removedDescendants?: number;
+            error?: string;
+          }> = [];
+          for (const item of tasks) {
+            const d = item.date ?? today;
+            const existing = await taskQueries.findByIdAndDate(
+              userId,
+              item.id,
+              d,
+            );
+            if (!existing) {
+              results.push({
+                task: null,
+                date: d,
+                error: `在 ${d} 未找到 id 为 ${item.id} 的任务`,
+              });
+              continue;
+            }
+            // 过去日期的已完成任务保持只读（历史记录不可改）
+            if (!isFutureOrToday(d) && existing.done) {
+              results.push({
+                task: null,
+                date: d,
+                error: `${d} 是过去日期且任务已完成，不能删除已完成的历史任务`,
+              });
+              continue;
+            }
+            const removed = await taskQueries.removeCascade(
+              userId,
+              item.id,
+              today,
+            );
+            if (!removed) {
+              results.push({
+                task: null,
+                date: d,
+                error: `未找到 id 为 ${item.id} 的任务`,
+              });
+              continue;
+            }
+            if ("error" in removed) {
+              results.push({ task: null, date: d, error: removed.error });
+              continue;
+            }
+            results.push({
+              task: removed.task,
+              date: d,
+              removedDescendants: removed.removedDescendants,
+            });
           }
-          // 过去日期的已完成任务保持只读（历史记录不可改）
-          if (!isFutureOrToday(d) && existing.done) {
-            return {
-              error: `${d} 是过去日期且任务已完成，不能删除已完成的历史任务`,
-              tasksByDate: await taskQueries.loadByDate(userId),
-            };
-          }
-          const deleted = await taskQueries.remove(userId, id);
-          const tasks = await taskQueries.loadDay(userId, d);
           return {
-            task: deleted,
-            tasks,
+            deleted: results,
             tasksByDate: await taskQueries.loadByDate(userId),
           };
         },
@@ -794,7 +993,7 @@ export function createTaskAgent(
       }),
       getPastIncompleteTasks: tool({
         description:
-          "查询过去日期（早于今天）所有未完成任务，返回迁移决策所需的上下文：pastIncomplete（过去未完成任务清单，含 id/title/date/importance/category/segmentId，按日期升序）+ segments（用户全部任务段）+ futureCounts（今天起未来 14 天每日已有任务数）。只读，不执行迁移。新一天问候时先调用此工具，再根据返回结果自主决策迁移方式：直接 moveTask / 合并 deleteTask+addTask / 跳过孤立历史任务。建议单日任务数上限 8 项，超出则顺延到 futureCounts 中下一个 count < 8 的日子。",
+          "查询过去日期（早于今天）所有未完成任务，返回迁移决策所需的上下文：pastIncomplete（过去未完成任务清单，含 id/title/date/parentId/metadata/importance/category/segmentId，按日期升序）+ segments（用户全部任务段）+ futureDays（今天起未来 14 天每日已有任务数，按任务数升序，越靠前越空闲）。只读，不执行迁移。新一天问候时先调用此工具，再根据返回结果自主决策迁移方式：连续性任务用 shiftTasks 整块偏移保持顺序、单条用 moveTask 移到任务数相对较少的日子、无顺序日常任务合并 deleteTask+addTask、跳过孤立历史任务。不设固定单天上限，把任务安排到相对较少的天数即可。",
         inputSchema: z.object({}).describe("无参数"),
         execute: async () => {
           return await taskQueries.getPastIncompleteData(userId, today);

@@ -7,15 +7,14 @@ import {
   Bell,
   Check,
   ChevronDown,
+  ChevronRight,
   Filter,
   LayoutGrid,
   LayoutList,
   Layers,
   Pencil,
   Search,
-  Tag,
   Trash2,
-  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -62,6 +61,7 @@ import {
   deleteTaskById,
   patchTaskFields,
 } from "@/lib/home/task-mutations";
+import { applyDoneCascade, buildDayForest } from "@/lib/home/task-tree";
 import { TaskBadges } from "@/components/home/reports";
 import { WeekCalendar } from "@/components/home/week-calendar";
 import {
@@ -84,7 +84,7 @@ import { CollisionPriority } from "@dnd-kit/abstract";
 export type ViewMode = "list" | "quadrant";
 
 /**
- * 任务下方的扩展徽章：任务段标识 + 自定义标签 + 提醒时间。
+ * 任务下方的扩展徽章：任务段标识 + 提醒时间。
  * 只在对应字段存在时渲染，保持简洁。
  */
 function TaskMetaBadges({
@@ -101,6 +101,7 @@ function TaskMetaBadges({
     : -1;
   const segment = segIndex >= 0 ? segments[segIndex] : null;
   const hasReminder = task.reminderAt && !task.done;
+  if (!segment && !hasReminder) return null;
   return (
     <div className="flex flex-wrap items-center gap-1">
       {segment && (
@@ -114,15 +115,6 @@ function TaskMetaBadges({
           {segment.name}
         </span>
       )}
-      {(task.tags ?? []).map((tag) => (
-        <span
-          key={tag}
-          className="inline-flex items-center gap-0.5 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium leading-none text-muted-foreground"
-        >
-          <Tag className="size-2.5" />
-          {tag}
-        </span>
-      ))}
       {hasReminder && (
         <span className="inline-flex items-center gap-0.5 rounded-full bg-orange-500/10 px-1.5 py-0.5 text-[10px] font-medium leading-none text-orange-700 dark:text-orange-300">
           <Bell className="size-2.5" />
@@ -141,13 +133,14 @@ export type TaskDragData = {
   title: string;
 };
 
-type EditMode = "rename" | "reminder" | "tags" | "delete";
+type EditMode = "rename" | "reminder" | "delete";
 type EditState = { task: Task; date: string; mode: EditMode } | null;
 
 /**
  * 任务卡片共享渲染层：负责布局、复选框、徽章、右键上下文菜单。
  * 拖拽通过 dnd-kit useSortable 实现：外层传入 dragRef 和 isDragging。
  * 单击卡片（非复选框区域）打开右侧任务编辑面板；复选框点击仍为切换完成状态。
+ * 任务树：childCount > 0 时渲染展开/收起子节点的 chevron（仅列表视图嵌套展示）。
  */
 function TaskCardShell({
   task,
@@ -161,6 +154,10 @@ function TaskCardShell({
   dragRef,
   onCheck,
   onEdit,
+  depth = 0,
+  childCount = 0,
+  expanded,
+  onToggleExpand,
 }: {
   task: Task;
   date: string;
@@ -173,6 +170,14 @@ function TaskCardShell({
   dragRef?: (element: Element | null) => void;
   onCheck: (task: Task, next: boolean, date: string) => void;
   onEdit: (mode: EditMode, task: Task, date: string) => void;
+  /** 嵌套深度（0 = 顶级），用于缩进 */
+  depth?: number;
+  /** 同一天内的直接子节点数（> 0 时显示展开 chevron） */
+  childCount?: number;
+  /** 子节点是否已展开 */
+  expanded?: boolean;
+  /** 切换子节点展开状态 */
+  onToggleExpand?: () => void;
 }) {
   const openTaskEditor = useHomeStore((s) => s.openTaskEditor);
   const isList = variant === "list";
@@ -182,6 +187,28 @@ function TaskCardShell({
 
   const cardContent = (
     <>
+      {/* 子节点展开/收起 chevron（点击不冒泡）；无子节点时在列表视图占位对齐 */}
+      {isList &&
+        (childCount > 0 ? (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleExpand?.();
+            }}
+            aria-label={expanded ? "收起子任务" : "展开子任务"}
+            className="-ml-1 mt-0.5 inline-flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+          >
+            <ChevronRight
+              className={cn(
+                "size-3.5 transition-transform",
+                expanded && "rotate-90",
+              )}
+            />
+          </button>
+        ) : (
+          <span className="-ml-1 mt-0.5 inline-flex size-5 shrink-0" />
+        ))}
       {/* 复选框点击不冒泡：避免触发卡片的「打开编辑面板」 */}
       {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions, jsx-a11y/click-events-have-key-events */}
       <span onClick={(e) => e.stopPropagation()} className="inline-flex">
@@ -202,6 +229,11 @@ function TaskCardShell({
           )}
         >
           {task.title}
+          {childCount > 0 && (
+            <span className="ml-1.5 text-xs text-muted-foreground">
+              · {childCount} 个子任务
+            </span>
+          )}
         </span>
         <TaskBadges task={task} showImportance={showImportance} />
         <TaskMetaBadges task={task} segments={segments} today={today} />
@@ -221,11 +253,18 @@ function TaskCardShell({
     isDragging && "opacity-40",
     dragRef && "active:cursor-grabbing",
   );
+  const labelStyle =
+    isList && depth > 0 ? { paddingLeft: `${depth * 20}px` } : undefined;
 
   if (!hasMenu) {
     return (
       // eslint-disable-next-line jsx-a11y/no-static-element-interactions, jsx-a11y/click-events-have-key-events
-      <div ref={dragRef} className={labelClass} onClick={handleCardClick}>
+      <div
+        ref={dragRef}
+        className={labelClass}
+        style={labelStyle}
+        onClick={handleCardClick}
+      >
         {cardContent}
       </div>
     );
@@ -236,7 +275,12 @@ function TaskCardShell({
       <ContextMenuTrigger
         render={
           // eslint-disable-next-line jsx-a11y/no-static-element-interactions, jsx-a11y/click-events-have-key-events
-          <div ref={dragRef} className={labelClass} onClick={handleCardClick} />
+          <div
+            ref={dragRef}
+            className={labelClass}
+            style={labelStyle}
+            onClick={handleCardClick}
+          />
         }
         className={labelClass}
       >
@@ -253,10 +297,6 @@ function TaskCardShell({
               <Bell className="size-3.5" />
               <span>{task.reminderAt ? "修改提醒" : "添加提醒"}</span>
             </ContextMenuItem>
-            <ContextMenuItem onClick={() => onEdit("tags", task, taskDate)}>
-              <Tag className="size-3.5" />
-              <span>编辑标签</span>
-            </ContextMenuItem>
             <ContextMenuSeparator />
           </>
         )}
@@ -266,7 +306,7 @@ function TaskCardShell({
             onClick={() => onEdit("delete", task, taskDate)}
           >
             <Trash2 className="size-3.5" />
-            <span>删除</span>
+            <span>删除{childCount > 0 ? "（含子任务）" : ""}</span>
           </ContextMenuItem>
         )}
       </ContextMenuContent>
@@ -285,6 +325,14 @@ type CardCommonProps = {
   variant: "list" | "quadrant";
   onCheck: (task: Task, next: boolean, date: string) => void;
   onEdit: (mode: EditMode, task: Task, date: string) => void;
+  /** 嵌套深度（0 = 顶级），用于列表视图缩进 */
+  depth?: number;
+  /** 同一天内的直接子节点数（> 0 时显示展开 chevron） */
+  childCount?: number;
+  /** 子节点是否已展开 */
+  expanded?: boolean;
+  /** 切换子节点展开状态 */
+  onToggleExpand?: () => void;
 };
 
 /**
@@ -303,6 +351,10 @@ function SortableTaskCard({
   group,
   onCheck,
   onEdit,
+  depth,
+  childCount,
+  expanded,
+  onToggleExpand,
 }: CardCommonProps & {
   index: number;
   group: string;
@@ -334,6 +386,10 @@ function SortableTaskCard({
       dragRef={ref}
       onCheck={onCheck}
       onEdit={onEdit}
+      depth={depth}
+      childCount={childCount}
+      expanded={expanded}
+      onToggleExpand={onToggleExpand}
     />
   );
 }
@@ -506,8 +562,16 @@ function StaticQuadrantCard({
   );
 }
 
+/** 任务段树的节点（带日期与嵌套子节点） */
+type SegmentTreeNode = {
+  task: Task;
+  date: string;
+  children: SegmentTreeNode[];
+};
+
 /**
- * 任务段详情 Dialog：展示某个任务段的所有任务，支持搜索和跳转。
+ * 任务段详情 Dialog：以任务树展示段内任务（任务段 = 根节点，
+ * 一级子节点默认可见，任意深度子节点可折叠展开），支持搜索和跳转。
  * 点击跳转按钮会切换 selectedDate 到任务所在日期并关闭 dialog。
  */
 function SegmentDialog({
@@ -526,8 +590,10 @@ function SegmentDialog({
   onJump: (date: string) => void;
 }) {
   const [search, setSearch] = useState("");
+  // 节点展开状态（默认收起，仅显示一级子节点）
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
 
-  // 收集该任务段的所有任务（带日期）
+  // 收集该任务段的所有任务（带日期，按日期升序）
   const allEntries = useMemo(() => {
     const entries: Array<{ task: Task; date: string }> = [];
     for (const [d, list] of Object.entries(tasksByDate)) {
@@ -539,11 +605,113 @@ function SegmentDialog({
     return entries;
   }, [tasksByDate, segment.id]);
 
+  // 构建任务树：根 = 段内 parentId 为空或母节点不在段内的节点；
+  // allEntries 已按日期升序，子节点插入顺序即日期升序
+  const roots = useMemo(() => {
+    const nodes = new Map<string, SegmentTreeNode>();
+    for (const e of allEntries) {
+      nodes.set(e.task.id, { task: e.task, date: e.date, children: [] });
+    }
+    const roots: SegmentTreeNode[] = [];
+    for (const n of nodes.values()) {
+      const pid = n.task.parentId;
+      if (pid && nodes.has(pid)) {
+        nodes.get(pid)!.children.push(n);
+      } else {
+        roots.push(n);
+      }
+    }
+    return roots;
+  }, [allEntries]);
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return allEntries;
+    if (!q) return null;
     return allEntries.filter((e) => e.task.title.toLowerCase().includes(q));
   }, [allEntries, search]);
+
+  const toggleExpand = (id: string) => {
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  /** 渲染单行的公共内容（复选框 + 标题 + 日期 + 跳转按钮） */
+  const renderRowContent = (task: Task, d: string) => {
+    const dateObj = date.parseDate(d);
+    const weekday = date.WEEKDAY_LABELS[(dateObj.getDay() + 6) % 7];
+    const dateLabel =
+      d === today ? "今天" : `${dateObj.getMonth() + 1}/${dateObj.getDate()}`;
+    return (
+      <>
+        <Checkbox checked={task.done} disabled className="size-4" />
+        <div className="flex flex-1 flex-col gap-0.5">
+          <span
+            className={cn(
+              "text-sm leading-snug",
+              task.done && "text-muted-foreground line-through",
+            )}
+          >
+            {task.title}
+          </span>
+          <span className="text-[10px] text-muted-foreground">
+            {dateLabel} 周{weekday}
+          </span>
+        </div>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          className="size-6 shrink-0"
+          onClick={() => onJump(d)}
+          aria-label="跳转到该任务"
+        >
+          <ArrowUpRight className="size-3.5" />
+        </Button>
+      </>
+    );
+  };
+
+  /** 递归渲染任务树节点（chevron 展开/收起子节点，按深度缩进） */
+  const renderTreeNode = (node: SegmentTreeNode, depth: number) => {
+    const hasChildren = node.children.length > 0;
+    const expanded = expandedIds.has(node.task.id);
+    return (
+      <li key={node.task.id}>
+        <div
+          className="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-muted"
+          style={depth > 0 ? { paddingLeft: `${depth * 20 + 8}px` } : undefined}
+        >
+          {hasChildren ? (
+            <button
+              type="button"
+              onClick={() => toggleExpand(node.task.id)}
+              aria-label={expanded ? "收起子任务" : "展开子任务"}
+              className="-ml-1 inline-flex size-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+            >
+              <ChevronRight
+                className={cn(
+                  "size-3.5 transition-transform",
+                  expanded && "rotate-90",
+                )}
+              />
+            </button>
+          ) : (
+            <span className="-ml-1 inline-flex size-5 shrink-0" />
+          )}
+          {renderRowContent(node.task, node.date)}
+        </div>
+        {hasChildren && expanded && (
+          <ul className="space-y-1">
+            {node.children.map((c) => renderTreeNode(c, depth + 1))}
+          </ul>
+        )}
+      </li>
+    );
+  };
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
@@ -574,51 +742,32 @@ function SegmentDialog({
           />
         </div>
         <ScrollArea className="max-h-80">
-          {filtered.length === 0 ? (
+          {allEntries.length === 0 ? (
             <p className="py-6 text-center text-sm text-muted-foreground">
-              {search ? "没有匹配的任务。" : "该任务段暂无任务。"}
+              该任务段暂无任务。
             </p>
-          ) : (
-            <ul className="space-y-1">
-              {filtered.map(({ task, date: d }) => {
-                const dateObj = date.parseDate(d);
-                const weekday = date.WEEKDAY_LABELS[(dateObj.getDay() + 6) % 7];
-                const dateLabel =
-                  d === today
-                    ? "今天"
-                    : `${dateObj.getMonth() + 1}/${dateObj.getDate()}`;
-                return (
+          ) : filtered ? (
+            filtered.length === 0 ? (
+              <p className="py-6 text-center text-sm text-muted-foreground">
+                没有匹配的任务。
+              </p>
+            ) : (
+              // 搜索时退回平铺列表
+              <ul className="space-y-1">
+                {filtered.map(({ task, date: d }) => (
                   <li
                     key={task.id}
                     className="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-muted"
                   >
-                    <Checkbox checked={task.done} disabled className="size-4" />
-                    <div className="flex flex-1 flex-col gap-0.5">
-                      <span
-                        className={cn(
-                          "text-sm leading-snug",
-                          task.done && "text-muted-foreground line-through",
-                        )}
-                      >
-                        {task.title}
-                      </span>
-                      <span className="text-[10px] text-muted-foreground">
-                        {dateLabel} 周{weekday}
-                      </span>
-                    </div>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-sm"
-                      className="size-6 shrink-0"
-                      onClick={() => onJump(d)}
-                      aria-label="跳转到该任务"
-                    >
-                      <ArrowUpRight className="size-3.5" />
-                    </Button>
+                    {renderRowContent(task, d)}
                   </li>
-                );
-              })}
+                ))}
+              </ul>
+            )
+          ) : (
+            // 默认：一级子节点树，可折叠展开
+            <ul className="space-y-1">
+              {roots.map((n) => renderTreeNode(n, 0))}
             </ul>
           )}
         </ScrollArea>
@@ -628,20 +777,17 @@ function SegmentDialog({
 }
 
 /**
- * 任务编辑 Dialog 集合：修改任务名 / 添加提醒 / 编辑标签 / 删除确认。
+ * 任务编辑 Dialog 集合：修改任务名 / 添加提醒 / 删除确认。
  * 根据 editState.mode 渲染对应的 Dialog。
  */
 function TaskEditDialogs({
   editState,
-  allTags,
   onClose,
   onRename,
   onSetReminder,
-  onSetTags,
   onDelete,
 }: {
   editState: EditState;
-  allTags: string[];
   onClose: () => void;
   onRename: (taskId: string, date: string, title: string) => void;
   onSetReminder: (
@@ -649,12 +795,10 @@ function TaskEditDialogs({
     date: string,
     reminderAt: string | null,
   ) => void;
-  onSetTags: (taskId: string, date: string, tags: string[]) => void;
   onDelete: (taskId: string, date: string) => void;
 }) {
   const isRename = editState?.mode === "rename";
   const isReminder = editState?.mode === "reminder";
-  const isTags = editState?.mode === "tags";
   const isDelete = editState?.mode === "delete";
 
   // --- rename ---
@@ -675,16 +819,6 @@ function TaskEditDialogs({
   ) {
     reminderTaskRef.current = editState;
     setReminderValue(date.isoToLocalInput(editState.task.reminderAt));
-  }
-
-  // --- tags ---
-  const [tagDraft, setTagDraft] = useState("");
-  const [tagsValue, setTagsValue] = useState<string[]>([]);
-  const tagsTaskRef = useRef<EditState>(null);
-  if (isTags && editState && tagsTaskRef.current?.task !== editState.task) {
-    tagsTaskRef.current = editState;
-    setTagsValue(editState.task.tags ?? []);
-    setTagDraft("");
   }
 
   if (!editState) return null;
@@ -709,30 +843,11 @@ function TaskEditDialogs({
     onClose();
   };
 
-  const addTag = (tag: string) => {
-    const t = tag.trim();
-    if (!t || tagsValue.includes(t)) return;
-    setTagsValue((prev) => [...prev, t]);
-    setTagDraft("");
-  };
-
-  const submitTags = () => {
-    if (!editState) return;
-    onSetTags(editState.task.id, editState.date, tagsValue);
-    onClose();
-  };
-
   const confirmDelete = () => {
     if (!editState) return;
     onDelete(editState.task.id, editState.date);
     onClose();
   };
-
-  const suggestions = allTags.filter(
-    (t) =>
-      !tagsValue.includes(t) &&
-      (!tagDraft || t.toLowerCase().includes(tagDraft.toLowerCase())),
-  );
 
   return (
     <>
@@ -789,72 +904,6 @@ function TaskEditDialogs({
             <Button onClick={submitReminder} disabled={!reminderValue}>
               保存
             </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* 编辑标签 */}
-      <Dialog open={isTags} onOpenChange={(open) => !open && onClose()}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>编辑标签</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-2">
-            <div className="flex flex-wrap gap-1.5">
-              {tagsValue.map((tag) => (
-                <span
-                  key={tag}
-                  className="inline-flex items-center gap-0.5 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground"
-                >
-                  <Tag className="size-2.5" />
-                  {tag}
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setTagsValue((prev) => prev.filter((t) => t !== tag))
-                    }
-                    className="ml-0.5 hover:text-foreground"
-                  >
-                    <X className="size-3" />
-                  </button>
-                </span>
-              ))}
-              {tagsValue.length === 0 && (
-                <span className="text-xs text-muted-foreground">暂无标签</span>
-              )}
-            </div>
-            <Input
-              value={tagDraft}
-              onChange={(e) => setTagDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  addTag(tagDraft);
-                }
-              }}
-              placeholder="输入标签后按 Enter 添加"
-            />
-            {suggestions.length > 0 && (
-              <div className="flex flex-wrap gap-1">
-                {suggestions.slice(0, 10).map((tag) => (
-                  <button
-                    key={tag}
-                    type="button"
-                    onClick={() => addTag(tag)}
-                    className="inline-flex items-center gap-0.5 rounded-full border px-1.5 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-muted"
-                  >
-                    <Tag className="size-2.5" />
-                    {tag}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={onClose}>
-              取消
-            </Button>
-            <Button onClick={submitTags}>保存</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -939,22 +988,10 @@ export function TaskPanel() {
   // 任务切换请求序号：快速连续勾选时丢弃过期 PATCH 响应
   const toggleSeqRef = useRef(0);
 
-  // 筛选：五育 + 重要度 + 标签（空数组表示不筛选该维度，即"全部"）
+  // 筛选：五育 + 重要度（空数组表示不筛选该维度，即"全部"）
   const [filterCategory, setFilterCategory] = useState<Category[]>([]);
   const [filterImportance, setFilterImportance] = useState<Importance[]>([]);
-  const [filterTags, setFilterTags] = useState<string[]>([]);
-  const allTags = useMemo(() => {
-    const set = new Set<string>();
-    for (const list of Object.values(tasksByDate)) {
-      for (const t of list)
-        for (const tag of t.tags ?? []) if (tag) set.add(tag);
-    }
-    return Array.from(set).sort((a, b) => a.localeCompare(b, "zh-Hans-CN"));
-  }, [tasksByDate]);
-  const hasFilter =
-    filterCategory.length > 0 ||
-    filterImportance.length > 0 ||
-    filterTags.length > 0;
+  const hasFilter = filterCategory.length > 0 || filterImportance.length > 0;
 
   // 四象限视图中，重要度筛选变为「淡化」而非过滤
   const importanceDimActive =
@@ -967,15 +1004,12 @@ export function TaskPanel() {
             const catOk =
               filterCategory.length === 0 ||
               filterCategory.includes(t.category);
-            const tagOk =
-              filterTags.length === 0 ||
-              filterTags.some((tag) => (t.tags ?? []).includes(tag));
             // 四象限视图：重要度不参与过滤（改为淡化）
             const impOk =
               importanceDimActive ||
               filterImportance.length === 0 ||
               filterImportance.includes(t.importance);
-            return catOk && tagOk && impOk;
+            return catOk && impOk;
           })
         : dayTasks,
     [
@@ -983,28 +1017,21 @@ export function TaskPanel() {
       hasFilter,
       filterCategory,
       filterImportance,
-      filterTags,
       importanceDimActive,
     ],
   );
   const displayRemaining = filteredTasks.filter((t) => !t.done).length;
 
-  /** 客户端勾选任务：SWR 乐观更新 */
+  /** 客户端勾选任务：SWR 乐观更新（子孙节点按任务树规则级联） */
   const toggleTask = async (id: string, next: boolean, taskDate: string) => {
     if (taskDate < today) return;
     const seq = ++toggleSeqRef.current;
     mutateTasks(
       (prev) => {
         if (!prev) return prev;
-        const list = prev.tasksByDate[taskDate] ?? [];
         return {
           ...prev,
-          tasksByDate: {
-            ...prev.tasksByDate,
-            [taskDate]: list.map((t) =>
-              t.id === id ? { ...t, done: next } : t,
-            ),
-          },
+          tasksByDate: applyDoneCascade(prev.tasksByDate, id, next, today),
         };
       },
       { revalidate: false },
@@ -1037,17 +1064,15 @@ export function TaskPanel() {
     if (entry) void toggleTask(entry.task.id, false, entry.date);
   };
 
-  /** 乐观更新任务字段 + PATCH 服务端（共享实现） */
+  /** 乐观更新任务字段 + PATCH 服务端（共享实现，属性级联覆盖子孙） */
   const patchFields = (
-    taskDate: string,
     taskId: string,
     fields: Partial<Task>,
     body: Record<string, unknown>,
-  ) => patchTaskFields(mutateTasks, taskDate, taskId, fields, body);
+  ) => patchTaskFields(mutateTasks, taskId, fields, body);
 
-  /** 乐观删除任务 + DELETE 服务端（共享实现） */
-  const deleteTask = (taskDate: string, taskId: string) =>
-    deleteTaskById(mutateTasks, taskDate, taskId);
+  /** 乐观删除任务（连带所有子孙）+ DELETE 服务端（共享实现） */
+  const deleteTask = (taskId: string) => deleteTaskById(mutateTasks, taskId);
 
   const handleEdit = (mode: EditMode, task: Task, taskDate: string) => {
     setEditState({ task, date: taskDate, mode });
@@ -1078,6 +1103,60 @@ export function TaskPanel() {
       .map((id) => taskMap.get(id))
       .filter((t): t is Task => t !== undefined);
   }, [sortableOrder, filteredTasks, dayTasks, viewMode]);
+
+  // --- 任务树（列表视图嵌套展示） ---
+  // childrenOf 基于 filteredTasks 构建：筛选时子节点只在母节点同现时嵌套
+  const dayForest = useMemo(() => buildDayForest(filteredTasks), [filteredTasks]);
+  // 顶级节点顺序跟随 orderedTasks（拖拽排序快照只含顶级节点 id）
+  const topLevelTasks = useMemo(() => {
+    const topIds = new Set(dayForest.top.map((t) => t.id));
+    return orderedTasks.filter((t) => topIds.has(t.id));
+  }, [orderedTasks, dayForest]);
+  // 子节点展开状态（默认收起）
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+  const toggleExpand = (id: string) => {
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  /** 递归渲染任务树节点：顶级节点可拖拽，子节点嵌套展示（不可拖拽） */
+  const renderTaskNode = (task: Task, index: number, depth: number) => {
+    const children = dayForest.childrenOf.get(task.id) ?? [];
+    const expanded = expandedIds.has(task.id);
+    const cardProps = {
+      task,
+      date: selectedDate,
+      segments,
+      today,
+      isPastDay,
+      showImportance: true,
+      variant: "list" as const,
+      onCheck: handleTaskCheck,
+      onEdit: handleEdit,
+      depth,
+      childCount: children.length,
+      expanded,
+      onToggleExpand: () => toggleExpand(task.id),
+    };
+    return (
+      <li key={task.id}>
+        {canDrag && depth === 0 ? (
+          <SortableTaskCard {...cardProps} index={index} group="list" />
+        ) : (
+          <PlainTaskCard {...cardProps} />
+        )}
+        {children.length > 0 && expanded && (
+          <ul className="mt-1 space-y-1">
+            {children.map((c) => renderTaskNode(c, -1, depth + 1))}
+          </ul>
+        )}
+      </li>
+    );
+  };
 
   return (
     <>
@@ -1211,35 +1290,6 @@ export function TaskPanel() {
                         </DropdownMenuCheckboxItem>
                       ))}
                     </DropdownMenuGroup>
-                    {allTags.length > 0 && (
-                      <>
-                        <DropdownMenuSeparator />
-                        <DropdownMenuGroup>
-                          <DropdownMenuLabel>自定义标签</DropdownMenuLabel>
-                          <DropdownMenuCheckboxItem
-                            checked={filterTags.length === 0}
-                            onCheckedChange={() => setFilterTags([])}
-                          >
-                            全部
-                          </DropdownMenuCheckboxItem>
-                          {allTags.map((tag) => (
-                            <DropdownMenuCheckboxItem
-                              key={tag}
-                              checked={filterTags.includes(tag)}
-                              onCheckedChange={(checked) =>
-                                setFilterTags((prev) =>
-                                  checked
-                                    ? [...prev, tag]
-                                    : prev.filter((x) => x !== tag),
-                                )
-                              }
-                            >
-                              {tag}
-                            </DropdownMenuCheckboxItem>
-                          ))}
-                        </DropdownMenuGroup>
-                      </>
-                    )}
                     {hasFilter && (
                       <>
                         <DropdownMenuSeparator />
@@ -1248,7 +1298,6 @@ export function TaskPanel() {
                             onClick={() => {
                               setFilterCategory([]);
                               setFilterImportance([]);
-                              setFilterTags([]);
                             }}
                           >
                             清除筛选
@@ -1305,38 +1354,11 @@ export function TaskPanel() {
                 没有符合筛选条件的任务。
               </p>
             ) : viewMode === "list" ? (
+              // 任务树列表：顶级节点可拖拽排序；子节点嵌套在母节点下，可展开/收起
               <ul className="space-y-1">
-                {orderedTasks.map((task, index) => (
-                  <li key={task.id}>
-                    {canDrag ? (
-                      <SortableTaskCard
-                        task={task}
-                        date={selectedDate}
-                        segments={segments}
-                        today={today}
-                        isPastDay={isPastDay}
-                        showImportance
-                        variant="list"
-                        index={index}
-                        group="list"
-                        onCheck={handleTaskCheck}
-                        onEdit={handleEdit}
-                      />
-                    ) : (
-                      <PlainTaskCard
-                        task={task}
-                        date={selectedDate}
-                        segments={segments}
-                        today={today}
-                        isPastDay={isPastDay}
-                        showImportance
-                        variant="list"
-                        onCheck={handleTaskCheck}
-                        onEdit={handleEdit}
-                      />
-                    )}
-                  </li>
-                ))}
+                {topLevelTasks.map((task, index) =>
+                  renderTaskNode(task, index, 0),
+                )}
               </ul>
             ) : (
               <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -1420,14 +1442,12 @@ export function TaskPanel() {
       {editState && (
         <TaskEditDialogs
           editState={editState}
-          allTags={allTags}
           onClose={() => setEditState(null)}
-          onRename={(taskId, d, title) =>
-            patchFields(d, taskId, { title }, { title })
+          onRename={(taskId, _d, title) =>
+            patchFields(taskId, { title }, { title })
           }
-          onSetReminder={(taskId, d, reminderAt) =>
+          onSetReminder={(taskId, _d, reminderAt) =>
             patchFields(
-              d,
               taskId,
               {
                 reminderAt: reminderAt ?? undefined,
@@ -1436,10 +1456,7 @@ export function TaskPanel() {
               { reminderAt },
             )
           }
-          onSetTags={(taskId, d, tags) =>
-            patchFields(d, taskId, { tags }, { tags })
-          }
-          onDelete={(taskId, d) => deleteTask(d, taskId)}
+          onDelete={(taskId, _d) => deleteTask(taskId)}
         />
       )}
     </>

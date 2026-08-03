@@ -33,7 +33,6 @@ const MOCK_TASKS: Task[] = [
     importance: "重要但不紧急",
     category: "智育",
     segmentId: "b6d5c8bf-b9e5-47a4-ad78-e9016c506589",
-    tags: [],
     reminderNotified: false,
   },
   {
@@ -43,7 +42,6 @@ const MOCK_TASKS: Task[] = [
     importance: "重要但不紧急",
     category: "智育",
     segmentId: "b6d5c8bf-b9e5-47a4-ad78-e9016c506589",
-    tags: [],
     reminderNotified: false,
   },
   {
@@ -53,7 +51,6 @@ const MOCK_TASKS: Task[] = [
     importance: "不重要且不紧急",
     category: "体育",
     segmentId: "b6d5c8bf-b9e5-47a4-ad78-e9016c506589",
-    tags: [],
     reminderNotified: false,
   },
 
@@ -64,7 +61,6 @@ const MOCK_TASKS: Task[] = [
     importance: "重要但不紧急",
     category: "智育",
     segmentId: "b6d5c8bf-b9e5-47a4-ad78-e9016c506589",
-    tags: [],
     reminderNotified: false,
   },
   {
@@ -74,7 +70,6 @@ const MOCK_TASKS: Task[] = [
     importance: "重要但不紧急",
     category: "智育",
     segmentId: "b6d5c8bf-b9e5-47a4-ad78-e9016c506589",
-    tags: [],
     reminderNotified: false,
   },
   {
@@ -84,7 +79,6 @@ const MOCK_TASKS: Task[] = [
     importance: "重要但不紧急",
     category: "智育",
     segmentId: "b6d5c8bf-b9e5-47a4-ad78-e9016c506589",
-    tags: [],
     reminderNotified: false,
   },
   {
@@ -94,7 +88,6 @@ const MOCK_TASKS: Task[] = [
     importance: "重要但不紧急",
     category: "智育",
     segmentId: "b6d5c8bf-b9e5-47a4-ad78-e9016c506589",
-    tags: [],
     reminderNotified: false,
   },
   {
@@ -104,7 +97,6 @@ const MOCK_TASKS: Task[] = [
     importance: "重要但不紧急",
     category: "智育",
     segmentId: "b6d5c8bf-b9e5-47a4-ad78-e9016c506589",
-    tags: [],
     reminderNotified: false,
   },
   {
@@ -114,7 +106,6 @@ const MOCK_TASKS: Task[] = [
     importance: "不重要但紧急",
     category: "智育",
     segmentId: "b6d5c8bf-b9e5-47a4-ad78-e9016c506589",
-    tags: [],
     reminderNotified: false,
   },
   {
@@ -124,7 +115,6 @@ const MOCK_TASKS: Task[] = [
     importance: "重要但不紧急",
     category: "智育",
     segmentId: "b6d5c8bf-b9e5-47a4-ad78-e9016c506589",
-    tags: [],
     reminderNotified: false,
   },
   {
@@ -134,7 +124,6 @@ const MOCK_TASKS: Task[] = [
     importance: "重要但不紧急",
     category: "智育",
     segmentId: "b6d5c8bf-b9e5-47a4-ad78-e9016c506589",
-    tags: [],
     reminderNotified: false,
   },
 ];

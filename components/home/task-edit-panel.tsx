@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Bell, ListTodo, Tag, X } from "lucide-react";
+import { Bell, ListTodo, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -29,7 +29,8 @@ import {
  *
  * 布局（自上而下）：
  * - 无边框任务名输入框（blur / Enter 提交）
- * - 标签修改 section：重要度紧急度（四象限）+ 五育 + 自定义标签
+ * - 标签修改 section：重要度紧急度（四象限）+ 五育
+ *   （任务树母节点覆盖策略：修改后该任务的所有子节点同步修改）
  * - 提醒 section：datetime-local 设置 / 清除
  *
  * 所有修改即改即存（乐观更新 + PATCH），任务被删除时自动关闭。
@@ -63,25 +64,22 @@ export function TaskEditPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [taskId]);
 
-  // 自定义标签草稿
-  const [tagDraft, setTagDraft] = useState("");
-
-  // 全部已用标签（用于自定义标签建议）
-  const allTags = useMemo(() => {
-    const set = new Set<string>();
+  // 该任务的直接子节点数（用于提示母节点覆盖策略）
+  const childCount = useMemo(() => {
+    if (!entry) return 0;
+    let n = 0;
     for (const list of Object.values(tasksData.tasksByDate)) {
-      for (const t of list)
-        for (const tag of t.tags ?? []) if (tag) set.add(tag);
+      for (const t of list) if (t.parentId === entry.task.id) n++;
     }
-    return Array.from(set).sort((a, b) => a.localeCompare(b, "zh-Hans-CN"));
-  }, [tasksData.tasksByDate]);
+    return n;
+  }, [entry, tasksData.tasksByDate]);
 
   if (!entry) return null;
   const { task, date: taskDate } = entry;
   const isPastDay = taskDate < today;
 
   const patch = (fields: Partial<Task>, body: Record<string, unknown>) => {
-    void patchTaskFields(mutateTasks, taskDate, task.id, fields, body);
+    void patchTaskFields(mutateTasks, task.id, fields, body);
   };
 
   const commitTitle = () => {
@@ -92,21 +90,6 @@ export function TaskEditPanel() {
     }
     patch({ title: v }, { title: v });
   };
-
-  const setTags = (tags: string[]) => patch({ tags }, { tags });
-
-  const addTag = (tag: string) => {
-    const t = tag.trim();
-    if (!t || (task.tags ?? []).includes(t)) return;
-    setTags([...(task.tags ?? []), t]);
-    setTagDraft("");
-  };
-
-  const tagSuggestions = allTags.filter(
-    (t) =>
-      !(task.tags ?? []).includes(t) &&
-      (!tagDraft || t.toLowerCase().includes(tagDraft.toLowerCase())),
-  );
 
   const dateObj = date.parseDate(taskDate);
   const dateLabel = `${taskDate === today ? "今天" : `${dateObj.getMonth() + 1}/${dateObj.getDate()}`} 周${date.WEEKDAY_LABELS[(dateObj.getDay() + 6) % 7]}`;
@@ -154,6 +137,11 @@ export function TaskEditPanel() {
             <h3 className="text-xs font-medium text-muted-foreground">
               重要度 · 紧急度
             </h3>
+            {childCount > 0 && (
+              <p className="text-[11px] text-muted-foreground/80">
+                该任务含 {childCount} 个子任务，修改后将同步到所有子任务
+              </p>
+            )}
             <RadioGroup
               value={task.importance}
               onValueChange={(v) =>
@@ -242,70 +230,6 @@ export function TaskEditPanel() {
                 </div>
               ))}
             </RadioGroup>
-          </section>
-
-          {/* 自定义标签 */}
-          <section className="flex flex-col gap-2">
-            <h3 className="text-xs font-medium text-muted-foreground">
-              自定义标签
-            </h3>
-            <div className="flex flex-wrap gap-1.5">
-              {(task.tags ?? []).map((tag) => (
-                <span
-                  key={tag}
-                  className="inline-flex items-center gap-0.5 rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground"
-                >
-                  <Tag className="size-2.5" />
-                  {tag}
-                  {!isPastDay && (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setTags((task.tags ?? []).filter((t) => t !== tag))
-                      }
-                      className="ml-0.5 hover:text-foreground"
-                      aria-label={`移除标签 ${tag}`}
-                    >
-                      <X className="size-3" />
-                    </button>
-                  )}
-                </span>
-              ))}
-              {(task.tags ?? []).length === 0 && (
-                <span className="text-xs text-muted-foreground">暂无标签</span>
-              )}
-            </div>
-            {!isPastDay && (
-              <>
-                <Input
-                  value={tagDraft}
-                  onChange={(e) => setTagDraft(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.nativeEvent.isComposing) {
-                      e.preventDefault();
-                      addTag(tagDraft);
-                    }
-                  }}
-                  placeholder="输入标签后按 Enter 添加"
-                  className="h-8 text-xs"
-                />
-                {tagSuggestions.length > 0 && (
-                  <div className="flex flex-wrap gap-1">
-                    {tagSuggestions.slice(0, 10).map((tag) => (
-                      <button
-                        key={tag}
-                        type="button"
-                        onClick={() => addTag(tag)}
-                        className="inline-flex items-center gap-0.5 rounded-full border px-1.5 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-muted"
-                      >
-                        <Tag className="size-2.5" />
-                        {tag}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </>
-            )}
           </section>
 
           <Separator />

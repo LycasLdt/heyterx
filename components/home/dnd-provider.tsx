@@ -13,6 +13,11 @@ import {
   type Importance,
   type Task,
 } from "@/lib/home/constants";
+import {
+  applyAttrCascade,
+  applyMoveCascade,
+  buildDayForest,
+} from "@/lib/home/task-tree";
 import type { TaskDragData } from "@/components/home/task-panel";
 import { date } from "@/lib/utils";
 
@@ -72,7 +77,8 @@ export function DndProvider({ children }: { children: React.ReactNode }) {
           .map((t) => t.id);
       }
     } else {
-      order["list"] = dayTasks.map((t) => t.id);
+      // 列表视图：任务树下只有顶级节点参与拖拽排序，子节点跟随母节点嵌套展示
+      order["list"] = buildDayForest(dayTasks).top.map((t) => t.id);
     }
 
     setSortableOrder(order);
@@ -116,6 +122,7 @@ export function DndProvider({ children }: { children: React.ReactNode }) {
   /**
    * 跨日期移动任务 + toast 撤回 action。
    * 保持任务 importance 不变（移到目标日期的对应象限）。
+   * 任务树级联：子孙节点按相同天数偏移一并移动（乐观更新与服务端一致）。
    */
   const moveTaskCrossDate = (
     taskId: string,
@@ -123,21 +130,13 @@ export function DndProvider({ children }: { children: React.ReactNode }) {
     sourceDate: string,
     targetDate: string,
   ) => {
-    // optimisticMove：从 sourceDate 移除，添加到 targetDate
+    // optimisticMove：母节点移到 targetDate，子孙按相同偏移一并移动
     mutateTasks(
       (prev) => {
         if (!prev) return prev;
-        const oldList = prev.tasksByDate[sourceDate] ?? [];
-        const newList = prev.tasksByDate[targetDate] ?? [];
-        const task = oldList.find((t) => t.id === taskId);
-        if (!task) return prev;
         return {
           ...prev,
-          tasksByDate: {
-            ...prev.tasksByDate,
-            [sourceDate]: oldList.filter((t) => t.id !== taskId),
-            [targetDate]: [...newList, task],
-          },
+          tasksByDate: applyMoveCascade(prev.tasksByDate, taskId, targetDate),
         };
       },
       { revalidate: false },
@@ -167,17 +166,13 @@ export function DndProvider({ children }: { children: React.ReactNode }) {
             mutateTasks(
               (prev) => {
                 if (!prev) return prev;
-                const oldList = prev.tasksByDate[targetDate] ?? [];
-                const newList = prev.tasksByDate[sourceDate] ?? [];
-                const task = oldList.find((t) => t.id === taskId);
-                if (!task) return prev;
                 return {
                   ...prev,
-                  tasksByDate: {
-                    ...prev.tasksByDate,
-                    [targetDate]: oldList.filter((t) => t.id !== taskId),
-                    [sourceDate]: [...newList, task],
-                  },
+                  tasksByDate: applyMoveCascade(
+                    prev.tasksByDate,
+                    taskId,
+                    sourceDate,
+                  ),
                 };
               },
               { revalidate: false },
@@ -327,16 +322,30 @@ export function DndProvider({ children }: { children: React.ReactNode }) {
         );
       }
 
-      // 跨象限：PATCH 服务端 importance
+      // 跨象限：PATCH 服务端 importance（母节点覆盖策略：子孙级联同步）
       if (importanceChange) {
+        const change = importanceChange;
+        // 子孙节点乐观级联（可能分布在其他日期）
+        mutateTasks(
+          (prev) => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              tasksByDate: applyAttrCascade(prev.tasksByDate, change.taskId, {
+                importance: change.newImportance,
+              }),
+            };
+          },
+          { revalidate: false },
+        );
         void (async () => {
           try {
             const res = await fetch("/api/tasks", {
               method: "PATCH",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({
-                id: importanceChange.taskId,
-                importance: importanceChange.newImportance,
+                id: change.taskId,
+                importance: change.newImportance,
               }),
             });
             if (!res.ok) throw new Error(`PATCH failed: ${res.status}`);

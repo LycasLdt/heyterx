@@ -16,10 +16,12 @@ import type {
 export const TOOL_LABELS: Record<string, string> = {
   searchTasks: "搜索任务",
   getTasks: "读取任务计划",
+  getTaskTree: "读取任务树",
   addTask: "新增任务",
   toggleTask: "切换任务状态",
   updateTask: "修改任务",
   moveTask: "移动任务",
+  shiftTasks: "整块移动任务",
   deleteTask: "删除任务",
   analyzeTaskBalance: "分析任务平衡",
   createTaskSegment: "创建任务段",

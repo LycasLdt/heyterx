@@ -488,10 +488,7 @@ export function ChatPanel() {
     const isStale = latest
       ? Object.values(latest).some((list) =>
           list.some(
-            (t) =>
-              t.importance === undefined ||
-              t.category === undefined ||
-              !Array.isArray(t.tags),
+            (t) => t.importance === undefined || t.category === undefined,
           ),
         )
       : false;
