@@ -31,6 +31,9 @@ export type ModelConfig = {
 /** 新一天打开后过去未完成任务的迁移模式 */
 export type MigrationMode = "none" | "important" | "all";
 
+/** Agent 提问模式：总是提问 / 尽可能不提问 / 绝不提问 */
+export type AskMode = "always" | "minimal" | "never";
+
 export type UserPreferences = {
   general: {
     /** 主题：light / dark / system */
@@ -41,8 +44,6 @@ export type UserPreferences = {
   agent: {
     /** 角色设定：用户自定义的 Agent 角色 prompt */
     role: string;
-    /** 技能设定：用户为 Agent 添加的多项技能 prompt */
-    skills: string[];
     /** 行为设定 */
     behavior: {
       /**
@@ -53,6 +54,15 @@ export type UserPreferences = {
        * 默认 "important"
        */
       migrationMode: MigrationMode;
+      /** 是否在新的一天问候（关闭后打开应用不再触发问候与迁移流程），默认 true */
+      greetingEnabled: boolean;
+      /**
+       * Agent 提问模式：
+       * - "always"：存在多种合理理解时总是先提问
+       * - "minimal"：仅信息缺失且显著影响结果时提问（默认）
+       * - "never"：绝不提问，一律自主决策
+       */
+      askMode: AskMode;
     };
   };
   models: {
@@ -71,9 +81,10 @@ export type PreferencesPatch = {
   };
   agent?: {
     role?: string;
-    skills?: string[];
     behavior?: {
       migrationMode?: MigrationMode;
+      greetingEnabled?: boolean;
+      askMode?: AskMode;
     };
   };
   models?: {

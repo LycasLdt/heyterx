@@ -18,7 +18,14 @@ import {
 /** 默认用户偏好（数据库中 preferences 为 NULL 时使用） */
 export const DEFAULT_PREFERENCES: UserPreferences = {
   general: { theme: "system", defaultTaskView: "list" },
-  agent: { role: "", skills: [], behavior: { migrationMode: "important" } },
+  agent: {
+    role: "",
+    behavior: {
+      migrationMode: "important",
+      greetingEnabled: true,
+      askMode: "minimal",
+    },
+  },
   models: { defaultModelId: "", configs: [] },
 };
 
@@ -28,7 +35,8 @@ export function mergePreferences(
   patch: PreferencesPatch,
 ): UserPreferences {
   const baseAgent = base.agent ?? DEFAULT_PREFERENCES.agent;
-  const baseBehavior = baseAgent.behavior ?? DEFAULT_PREFERENCES.agent.behavior;
+  const baseBehavior =
+    baseAgent.behavior ?? DEFAULT_PREFERENCES.agent.behavior;
   return {
     general: {
       theme: patch.general?.theme ?? base.general.theme,
@@ -37,10 +45,18 @@ export function mergePreferences(
     },
     agent: {
       role: patch.agent?.role ?? baseAgent.role,
-      skills: patch.agent?.skills ?? baseAgent.skills,
       behavior: {
         migrationMode:
           patch.agent?.behavior?.migrationMode ?? baseBehavior.migrationMode,
+        // 旧数据可能缺少新字段，回退到默认值
+        greetingEnabled:
+          patch.agent?.behavior?.greetingEnabled ??
+          baseBehavior.greetingEnabled ??
+          DEFAULT_PREFERENCES.agent.behavior.greetingEnabled,
+        askMode:
+          patch.agent?.behavior?.askMode ??
+          baseBehavior.askMode ??
+          DEFAULT_PREFERENCES.agent.behavior.askMode,
       },
     },
     models: {

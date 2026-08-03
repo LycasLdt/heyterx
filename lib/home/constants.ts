@@ -26,6 +26,7 @@ export const TOOL_LABELS: Record<string, string> = {
   updateTaskSegment: "修改任务段",
   exportTasks: "导出任务",
   getPastIncompleteTasks: "读取过去未完成任务",
+  askQuestions: "向用户提问",
 };
 
 /** 静默工具：不向用户展示其工具调用气泡（记忆系统相关操作对用户不可见） */
@@ -113,6 +114,23 @@ export function formatReminder(reminderIso: string, today: string): string {
   if (ymd === tomorrowStr) return `明天 ${hh}:${mm}`;
   return `${d.getMonth() + 1}/${d.getDate()} ${hh}:${mm}`;
 }
+
+/** 重要度×紧急度四象限取值（艾森豪威尔矩阵标准） */
+export const IMPORTANCE_VALUES = [
+  "重要且紧急",
+  "重要但不紧急",
+  "不重要但紧急",
+  "不重要且不紧急",
+] as const;
+
+/** 五育分类取值（德/智/体/美/劳） */
+export const CATEGORY_VALUES = [
+  "德育",
+  "智育",
+  "体育",
+  "美育",
+  "劳育",
+] as const;
 
 /** 重要度紧急度的样式与象限信息 */
 export const IMPORTANCE_META: Record<

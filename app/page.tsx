@@ -12,6 +12,7 @@ import type { UserPreferences } from "@/lib/db/schema";
 import { AppHeader } from "@/components/home/app-header";
 import { ReportReminder } from "@/components/home/report-reminder";
 import { TaskPanel } from "@/components/home/task-panel";
+import { TaskEditPanel } from "@/components/home/task-edit-panel";
 import { ChatPanel } from "@/components/home/chat-panel";
 import { ReportPanel } from "@/components/home/reports";
 import { ExportPanel } from "@/components/home/exports";
@@ -117,6 +118,11 @@ export default function Home() {
           {activePanel === "report" && (
             <div className="flex min-h-0 min-w-0 flex-1 flex-col md:flex-none md:w-96 md:border-l md:border-border lg:w-[28rem] xl:w-[32rem]">
               <ReportPanel />
+            </div>
+          )}
+          {activePanel === "task" && (
+            <div className="flex min-h-0 min-w-0 flex-1 flex-col md:flex-none md:w-96 md:border-l md:border-border lg:w-[28rem] xl:w-[32rem]">
+              <TaskEditPanel />
             </div>
           )}
 

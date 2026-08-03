@@ -16,6 +16,7 @@ import {
   TriangleAlert,
   X,
 } from "lucide-react";
+import { Switch } from "@/components/ui/switch";
 import {
   Dialog,
   DialogContent,
@@ -62,6 +63,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import type {
+  AskMode,
   MigrationMode,
   ModelApiFormat,
   ModelConfig,
@@ -99,8 +101,13 @@ const MIGRATION_MODES = [
   { value: "important", label: "仅迁移重要任务" },
   { value: "all", label: "全部迁移" },
 ];
+const ASK_MODES = [
+  { value: "always", label: "总是" },
+  { value: "minimal", label: "尽可能不" },
+  { value: "never", label: "绝不" },
+];
 
-const APP_VERSION = "0.4.1";
+const APP_VERSION = "0.5.3";
 
 export function SettingsDialog() {
   const router = useRouter();
@@ -330,18 +337,14 @@ function AgentPanel({
   onInnerLayerOpenChange: (open: boolean) => void;
 }) {
   const [roleDraft, setRoleDraft] = useState(prefs.agent.role);
-  const [skillsDraft, setSkillsDraft] = useState<string[]>(prefs.agent.skills);
   const [saving, setSaving] = useState(false);
 
   // 外部 preferences 变化时同步本地 draft
   useEffect(() => {
     setRoleDraft(prefs.agent.role);
-    setSkillsDraft(prefs.agent.skills);
   }, [prefs]);
 
-  const dirty =
-    roleDraft !== prefs.agent.role ||
-    JSON.stringify(skillsDraft) !== JSON.stringify(prefs.agent.skills);
+  const dirty = roleDraft !== prefs.agent.role;
 
   const handleSave = async () => {
     setSaving(true);
@@ -349,7 +352,6 @@ function AgentPanel({
       await onPatch({
         agent: {
           role: roleDraft,
-          skills: skillsDraft.filter((s) => s.trim()),
         },
       });
     } finally {
@@ -361,6 +363,112 @@ function AgentPanel({
     <div className="space-y-6">
       <ModelsSection prefs={prefs} onPatch={onPatch} userId={userId} />
       <Separator />
+      <section className="space-y-3">
+        <h3 className="text-sm font-semibold">行为</h3>
+        {/* 第一组：新一天问候 + 迁移方式 */}
+        <div className="flex flex-col gap-4 rounded-md border p-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-sm">新的一天问候</p>
+              <p className="text-xs text-muted-foreground">
+                打开应用时是否触发问候与过去未完成任务的迁移流程
+              </p>
+            </div>
+            <Switch
+              checked={prefs.agent.behavior?.greetingEnabled ?? true}
+              onCheckedChange={(v) =>
+                onPatch({
+                  agent: {
+                    behavior: { greetingEnabled: v === true },
+                  },
+                })
+              }
+            />
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <Label className="text-sm">迁移方式</Label>
+              <p className="text-xs text-muted-foreground">
+                新的一天打开应用时，如何处理过去未完成的任务。
+              </p>
+            </div>
+            <Select
+              items={MIGRATION_MODES}
+              value={prefs.agent.behavior?.migrationMode ?? "important"}
+              onOpenChange={onInnerLayerOpenChange}
+              onValueChange={(v) => {
+                onPatch({
+                  agent: {
+                    behavior: {
+                      migrationMode: v as MigrationMode,
+                    },
+                  },
+                });
+              }}
+              disabled={!(prefs.agent.behavior?.greetingEnabled ?? true)}
+            >
+              <SelectTrigger className="w-48">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  {MIGRATION_MODES.map((m) => (
+                    <SelectItem key={m.value} value={m.value}>
+                      <div className="flex flex-col gap-1">
+                        {m.label}
+                        {m.value === "important" && (
+                          <p className="text-xs text-muted-foreground">
+                            跳过不重要且不紧急的琐事
+                          </p>
+                        )}
+                      </div>
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+        {/* 第二组：提问模式 */}
+        <div className="space-y-2 rounded-md border p-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="space-y-1">
+              <Label className="text-sm">提问模式</Label>
+              <p className="text-xs text-muted-foreground">
+                控制 Agent 在信息模糊时是否主动向你提问。
+              </p>
+            </div>
+            <Select
+              items={ASK_MODES}
+              value={prefs.agent.behavior?.askMode ?? "minimal"}
+              onOpenChange={onInnerLayerOpenChange}
+              onValueChange={(v) => {
+                onPatch({
+                  agent: {
+                    behavior: { askMode: v as AskMode },
+                  },
+                });
+              }}
+            >
+              <SelectTrigger className="w-48">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  {ASK_MODES.map((m) => (
+                    <SelectItem key={m.value} value={m.value}>
+                      {m.label}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+      </section>
+
+      <Separator />
+
       <section className="space-y-2">
         <h3 className="text-sm font-semibold">角色设置</h3>
         <p className="text-xs text-muted-foreground">
@@ -372,108 +480,12 @@ function AgentPanel({
           placeholder="例如：你是一位温柔耐心的学习伙伴，擅长用鼓励的语气陪伴我完成每日任务…"
           className="min-h-24"
         />
-      </section>
-
-      <Separator />
-
-      <section className="space-y-2">
-        <div className="flex items-center justify-between">
-          <h3 className="text-sm font-semibold">技能设置</h3>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => setSkillsDraft([...skillsDraft, ""])}
-          >
-            <Plus className="size-4" /> 添加技能
+        <div className="flex justify-end">
+          <Button onClick={handleSave} disabled={!dirty || saving}>
+            {saving ? "保存中…" : "保存"}
           </Button>
         </div>
-        <p className="text-xs text-muted-foreground">
-          为 Agent 添加多项技能提示词，保存后下次对话生效。
-        </p>
-        <div className="space-y-2">
-          {skillsDraft.length === 0 ? (
-            <p className="rounded-md border border-dashed py-4 text-center text-xs text-muted-foreground">
-              暂无技能，点击「添加技能」新建。
-            </p>
-          ) : (
-            skillsDraft.map((s, i) => (
-              <div key={i} className="flex items-start gap-2">
-                <Textarea
-                  value={s}
-                  onChange={(e) =>
-                    setSkillsDraft(
-                      skillsDraft.map((x, j) => (j === i ? e.target.value : x)),
-                    )
-                  }
-                  placeholder={`技能 ${i + 1} 的提示词…`}
-                  className="min-h-16"
-                />
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  onClick={() =>
-                    setSkillsDraft(skillsDraft.filter((_, j) => j !== i))
-                  }
-                  aria-label="删除技能"
-                >
-                  <Trash2 className="size-4" />
-                </Button>
-              </div>
-            ))
-          )}
-        </div>
       </section>
-
-      <Separator />
-
-      <section className="space-y-2">
-        <h3 className="text-sm font-semibold">行为</h3>
-        <p className="text-xs text-muted-foreground">
-          新的一天打开应用时，如何处理过去未完成的任务。
-        </p>
-        <Select
-          items={MIGRATION_MODES}
-          value={prefs.agent.behavior?.migrationMode ?? "important"}
-          onOpenChange={onInnerLayerOpenChange}
-          onValueChange={(v) => {
-            onPatch({
-              agent: {
-                behavior: {
-                  migrationMode: v as MigrationMode,
-                },
-              },
-            });
-          }}
-        >
-          <SelectTrigger className="w-48">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectGroup>
-              {MIGRATION_MODES.map((m) => (
-                <SelectItem key={m.value} value={m.value}>
-                  <div className="flex flex-col gap-1">
-                    {m.label}
-                    {m.value === "important" && (
-                      <p className="text-xs text-muted-foreground">
-                        跳过不重要且不紧急的琐事
-                      </p>
-                    )}
-                  </div>
-                </SelectItem>
-              ))}
-            </SelectGroup>
-          </SelectContent>
-        </Select>
-      </section>
-
-      <div className="flex justify-end">
-        <Button onClick={handleSave} disabled={!dirty || saving}>
-          {saving ? "保存中…" : "保存"}
-        </Button>
-      </div>
     </div>
   );
 }

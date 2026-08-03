@@ -30,7 +30,7 @@ const WEEK_NAV_THROTTLE_MS = 500;
  *    - 上下周按钮 → 节流切换 weekOffset
  *    - sortable 容器 → 用 move() 实时更新 sortableOrder
  * 4. onDragEnd：
- *    - 拖到对话框 → 添加任务参考
+ *    - 拖到对话框 → 末尾追加 @<任务名> 引用
  *    - 拖到周历日期格 → 跨日期移动 + toast 撤回，清空 sortableOrder 后切换页面
  *    - 拖到上下周按钮 → 视为取消
  *    - sortable 容器 → 写回 SWR + 跨象限 PATCH importance
@@ -44,7 +44,7 @@ export function DndProvider({ children }: { children: React.ReactNode }) {
   const setSelectedDate = useHomeStore((s) => s.setSelectedDate);
   const prevWeek = useHomeStore((s) => s.prevWeek);
   const nextWeek = useHomeStore((s) => s.nextWeek);
-  const addChatTaskRef = useHomeStore((s) => s.addChatTaskRef);
+  const insertChatMention = useHomeStore((s) => s.insertChatMention);
   const { data: tasksData, mutate: mutateTasks } = useTasks();
 
   // 周历导航节流：记录上次切换时间
@@ -217,18 +217,10 @@ export function DndProvider({ children }: { children: React.ReactNode }) {
 
     const dragData = source.data as TaskDragData | undefined;
 
-    // 拖到对话框 → 添加任务参考
+    // 拖到对话框 → 末尾追加 @<任务名>（由 chat-panel 消费 chatMention 写入输入框）
     if (target?.id === "chat-input") {
       if (dragData?.kind === "task") {
-        addChatTaskRef({
-          id:
-            typeof crypto !== "undefined" && crypto.randomUUID
-              ? crypto.randomUUID()
-              : `ref-${Date.now()}`,
-          taskId: dragData.taskId,
-          title: dragData.title,
-          date: selectedDate,
-        });
+        insertChatMention(dragData.title);
       }
       setSortableOrder(null);
       setDragOverDate(null);

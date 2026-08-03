@@ -1,6 +1,6 @@
 "use client";
 
-import { Bot, Download, FileText, Settings } from "lucide-react";
+import { Bot, Download, FileText, ListTodo, Settings } from "lucide-react";
 import {
   Sidebar,
   SidebarContent,
@@ -17,9 +17,10 @@ import {
 } from "@/components/ui/tooltip";
 import { useHomeStore } from "@/lib/home/store";
 
-type PanelId = "chat" | "export" | "report";
+type PanelId = "task" | "chat" | "export" | "report";
 
 const ITEMS: { id: PanelId; icon: typeof Bot; label: string }[] = [
+  { id: "task", icon: ListTodo, label: "任务" },
   { id: "chat", icon: Bot, label: "Agent" },
   { id: "export", icon: Download, label: "导出" },
   { id: "report", icon: FileText, label: "报告" },
@@ -29,6 +30,7 @@ const ITEMS: { id: PanelId; icon: typeof Bot; label: string }[] = [
  * 右侧 icon 导航栏：桌面端竖直排列在右侧，手机端水平排列在最下方。
  * 点击图标切换对应面板；再次点击当前激活项则收起（回到仅任务面板）。
  *
+ * - 「任务」入口固定在最上方，仅在选中了要编辑的任务时显示
  * - 手机端：图标水平居中显示在底部 bar
  * - 桌面端：图标竖直排列在顶部，「设置」项固定在最下端
  *
@@ -38,9 +40,12 @@ const ITEMS: { id: PanelId; icon: typeof Bot; label: string }[] = [
 export function SideToolbar() {
   const activePanel = useHomeStore((s) => s.activePanel);
   const setActivePanel = useHomeStore((s) => s.setActivePanel);
+  const editingTask = useHomeStore((s) => s.editingTask);
   const setSettingsOpen = useHomeStore((s) => s.setSettingsOpen);
 
   const renderItem = (item: (typeof ITEMS)[number]) => {
+    // 任务编辑面板入口：没有选中的任务时不显示
+    if (item.id === "task" && !editingTask) return null;
     const isActive = activePanel === item.id;
     return (
       <SidebarMenuItem key={item.id}>

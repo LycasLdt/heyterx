@@ -24,6 +24,11 @@ import {
   SYSTEM_TRIGGER_PREFIX,
   TOOL_LABELS,
 } from "@/lib/home/constants";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "../ui/collapsible";
 
 /**
  * 推理过程区块：与工具调用相似的胶囊样式，使用 Brain icon，
@@ -45,13 +50,15 @@ function ReasoningBlock({ text, state }: { text: string; state?: string }) {
   const isStreaming = state === "streaming";
 
   return (
-    <div className="flex flex-col gap-1">
-      <button
-        type="button"
-        onClick={() => setExpanded((v) => !v)}
+    <Collapsible
+      open={expanded}
+      className="group flex flex-col gap-2 rounded-lg border bg-background px-2.5 py-1 text-xs text-muted-foreground transition-[width]"
+      onOpenChange={(open) => setExpanded(open)}
+    >
+      <CollapsibleTrigger
+        className="inline-flex gap-1.5 w-full self-start hover:text-foreground"
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
-        className="inline-flex items-center gap-1.5 self-start rounded-full border bg-background px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
       >
         {hovered ? (
           <ChevronRight
@@ -81,13 +88,11 @@ function ReasoningBlock({ text, state }: { text: string; state?: string }) {
         ) : (
           <span className="font-medium">思考完成</span>
         )}
-      </button>
-      {expanded && (
-        <div className="w-full whitespace-pre-wrap rounded-lg border border-border/50 bg-muted/30 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
-          {text || (isStreaming ? "…" : "（无内容）")}
-        </div>
-      )}
-    </div>
+      </CollapsibleTrigger>
+      <CollapsibleContent className="h-(--collapsible-panel-height) whitespace-pre-wrap overflow-hidden transition-[height] data-ending-style:h-0 data-starting-style:h-0">
+        {text || (isStreaming ? "…" : "（无内容）")}
+      </CollapsibleContent>
+    </Collapsible>
   );
 }
 
@@ -165,7 +170,7 @@ export const MessageItem = memo(function MessageItem({
         <div
           className={cn(
             "flex max-w-[80%] flex-col gap-1.5",
-            msg.role === "user" ? "items-end" : "items-start"
+            msg.role === "user" ? "items-end" : "items-start",
           )}
         >
           {msg.parts.map((part, i) => {
@@ -177,10 +182,7 @@ export const MessageItem = memo(function MessageItem({
                 state?: string;
               };
               // 思考刚开始时 text 可能为空，但 streaming 状态仍需显示「思考中」
-              if (
-                !reasoningPart.text &&
-                reasoningPart.state !== "streaming"
-              ) {
+              if (!reasoningPart.text && reasoningPart.state !== "streaming") {
                 return null;
               }
               return (
@@ -209,7 +211,7 @@ export const MessageItem = memo(function MessageItem({
                     "max-w-full rounded-2xl px-3.5 py-2 text-sm leading-relaxed",
                     isAssistant
                       ? "bg-muted text-foreground"
-                      : "bg-primary text-primary-foreground"
+                      : "bg-primary text-primary-foreground",
                   )}
                 >
                   {isAssistant && !isStreaming ? (
@@ -276,7 +278,9 @@ export const MessageItem = memo(function MessageItem({
                   ? "完成"
                   : toolPart.state === "output-error"
                     ? "出错"
-                    : "调用中…";
+                    : toolName === "askQuestions"
+                      ? "等待回答…"
+                      : "调用中…";
 
               // exportTasks 工具输出特殊渲染：文件下载卡片
               if (
@@ -289,7 +293,7 @@ export const MessageItem = memo(function MessageItem({
                   return (
                     <div
                       key={key}
-                      className="inline-flex items-center gap-1.5 rounded-full border border-destructive/30 bg-destructive/5 px-2.5 py-1 text-xs text-destructive"
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-destructive/30 bg-destructive/5 px-2.5 py-1 text-xs text-destructive"
                     >
                       <Wrench className="size-3" />
                       <span>导出失败</span>
@@ -327,7 +331,7 @@ export const MessageItem = memo(function MessageItem({
               return (
                 <div
                   key={key}
-                  className="inline-flex items-center gap-1.5 rounded-full border bg-background px-2.5 py-1 text-xs text-muted-foreground"
+                  className="inline-flex items-center gap-1.5 rounded-lg border bg-background px-2.5 py-1 text-xs text-muted-foreground"
                 >
                   <Wrench className="size-3" />
                   <span>{label}</span>

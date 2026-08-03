@@ -16,6 +16,7 @@ import {
   type TasksByDate,
 } from "../db/queries";
 import type { UserPreferences } from "../db/schema";
+import { askQuestionsInputSchema } from "@/lib/ai/ask-questions";
 import { writeCoreMemory } from "@/lib/ai/memory";
 import { exportTasksToPdf } from "@/lib/pdf/export";
 import { createCustomLanguageModel } from "@/lib/ai/custom-language-model";
@@ -63,6 +64,7 @@ const TASKS_INSTRUCTIONS = `你是 heyterx 的任务管理助手，帮助用户�
 - exportTasks：导出任务计划为 PDF（含任务表格与打卡框），返回下载链接。用户说「导出/打印/下载任务」「导出任务段」「导出这周/这个月计划」时调用，传入 startDate、endDate（必填）与 segmentId（可选）。
 - updateCoreMemory：覆盖更新用户的核心记忆（markdown）。核心记忆保存用户偏好/性格/目标/身份等长期信息，每个用户只一份，由你在对话中主动维护。保持简洁（建议 < 500 字）。
 - searchConversations：用简短关键词搜索本用户的历史对话消息，返回匹配片段。当需要回忆之前讨论过的内容、确认用户曾经说过的偏好或计划时调用。
+- askQuestions：向用户提问（一次可提 1-5 个问题），每个问题附 2-6 个候选选项，用户可选择选项或在「其他」中自由输入。调用后暂停等待，用户回答（或 3 分钟超时）后工具返回回答结果。仅在用户需求模糊、且缺失的信息会显著影响最终生成效果时使用（如关键的拆分依据、时间范围、数量等无法合理推断）；能根据上下文、核心记忆或常识自主决策时绝对不要提问，更不要为了"确认"而提问。提问前不要用文字预告，直接调用工具。
 
 日期格式 YYYY-MM-DD（如 2026-06-27）。核心约束：
 1. 过去日期的「已完成」任务保持只读（历史记录不可改）；过去日期的「未完成」任务允许 moveTask 移动到今天及以后、允许 deleteTask 删除（用于新一天迁移与合并迁移场景）。updateTask 只能修改今天及以后的任务（含标题、重要度、五育、标签、提醒、任务段归属）。
@@ -78,12 +80,13 @@ D. 修改类工具（addTask/toggleTask/updateTask/moveTask/deleteTask/createTas
 E. 回复保持简洁中文，温暖但不啰嗦。
 F. addTask 时务必根据任务内容主动判断 importance 与 category，不要全部塞到默认值。
 G. addTask / updateTask / moveTask 支持批量操作（传入数组）。优先用一次批量调用减少轮次，也可分多次调用。
+H. 提问准则：askQuestions 用于消除会实质影响结果的歧义。一次调用把相关问题全部问完，不要多轮反复提问。工具返回 timedOut=true（用户超时未答完）或 skipped=true（用户跳过）时，按最合理的方案自主决策继续执行，不要就同一问题再次提问；返回的 answers 中 answer 为"未回答"的问题同样自主决策处理。
 
 任务段安排工作流（用户给出一段时间的任务清单时）：
 1. 先用 createTaskSegment 创建对应任务段（如用户说"安排暑假计划"，创建「暑假任务段」并换算 startDate/endDate）。
 2. 遍历用户给出的任务清单：
    · 任务足够具体（有明确页数/章节/数量等）→ 直接安排到合适日期
-   · 任务不够具体（如"完成一册"无页数信息）→ 先询问用户是否有更详细的拆分信息
+   · 任务不够具体（如"完成一册"无页数信息）→ 调用 askQuestions 询问用户是否有更详细的拆分信息（如总页数/章节数/每天可投入时长），一次问完
 3. 用户回答后，根据信息将大任务拆分成细小可执行的子任务（如按章节/页数/天数拆分），均匀分布到任务段日期范围内。
 4. 拆分时主动加入缓冲微任务（体育/美育/劳育类，时长 3-10 分钟），以保持五育与重要度紧急度的平衡，避免认知过载，从根源减少焦虑与倦怠。
 5. 用 addTask 批量创建所有任务（可分多次调用），每条带 segmentId 关联到任务段。
@@ -158,7 +161,7 @@ G. addTask / updateTask / moveTask 支持批量操作（传入数组）。优先
  * 工具直接读写数据库（按 userId 隔离），不再依赖客户端传入任务地图。
  * @param userId 当前登录用户 id
  * @param today 客户端今天对应的 YYYY-MM-DD，用于默认日期与"仅今天及以后可改"的校验
- * @param preferences 用户自定义 Agent 配置（角色 / 技能 / 默认模型），可选
+ * @param preferences 用户自定义 Agent 配置（角色 / 行为 / 默认模型），可选
  * @param coreMemory 用户核心记忆 markdown，可选；为空字符串或未传则不注入
  * @param now 客户端当前时间的 ISO 字符串，用于注入到 instructions 让模型知道当前日期时间
  */
@@ -175,7 +178,7 @@ export function createTaskAgent(
   // 选择模型：优先用户配置的默认模型；找不到则回退到内置 deepseek-v4-flash
   const model = resolveModel(preferences);
 
-  // 注入用户自定义 Agent 配置（角色 / 技能）到 instructions
+  // 注入用户自定义 Agent 配置（角色 / 行为）到 instructions
   let instructions = TASKS_INSTRUCTIONS;
 
   // 注入当前时间，让模型知道现在是什么时候，避免年份/时段判断错误
@@ -188,8 +191,8 @@ export function createTaskAgent(
   }
 
   // 注入迁移模式设定，让 agent 在新一天问候时按用户偏好决策迁移范围
-  const migrationMode =
-    preferences?.agent.behavior?.migrationMode ?? "important";
+  const behavior = preferences?.agent.behavior;
+  const migrationMode = behavior?.migrationMode ?? "important";
   const migrationModeLabel =
     migrationMode === "none"
       ? "不迁移"
@@ -197,19 +200,27 @@ export function createTaskAgent(
         ? "全部迁移"
         : "仅迁移重要任务";
   instructions += `\n\n--- 迁移模式 ---\n用户设定的迁移模式为「${migrationModeLabel}」（migrationMode="${migrationMode}"）。新一天问候迁移过去未完成任务时，按此模式决策：${migrationMode === "none" ? "不迁移任何过去未完成任务。" : migrationMode === "all" ? "迁移所有过去未完成任务。" : '仅迁移重要任务（importance 为"重要且紧急"或"重要但不紧急"的），不重要任务保持原位不迁移。'}`;
+
+  // 注入提问模式设定，控制 agent 在信息模糊时是否主动提问
+  const askMode = behavior?.askMode ?? "minimal";
+  const askModeLabel =
+    askMode === "always"
+      ? "总是"
+      : askMode === "never"
+        ? "绝不"
+        : "尽可能不";
+  const askModeGuidance =
+    askMode === "always"
+      ? "存在多种合理理解时，先调用 askQuestions 提问澄清，不要自主猜测。"
+      : askMode === "never"
+        ? "绝不调用 askQuestions，一律根据上下文/记忆/常识自主决策；信息不足时按最合理方案执行并向用户说明。"
+        : "仅在信息缺失会显著影响结果、且无法根据上下文/记忆/常识自主决策时才调用 askQuestions；能自主决策时不要提问。";
+  instructions += `\n\n--- 提问模式 ---\n用户设定的提问模式为「${askModeLabel}」（askMode="${askMode}"）。${askModeGuidance}`;
+
+  // 注入用户自定义角色设定
   const role = preferences?.agent.role?.trim();
-  const skills =
-    preferences?.agent.skills?.map((s) => s.trim()).filter(Boolean) ?? [];
-  if (role || skills.length > 0) {
-    instructions += "\n\n--- 用户自定义 Agent 配置（优先遵循） ---";
-    if (role) {
-      instructions += `\n\n## 角色设定\n${role}`;
-    }
-    if (skills.length > 0) {
-      instructions += `\n\n## 技能设定\n${skills
-        .map((s, i) => `${i + 1}. ${s}`)
-        .join("\n")}`;
-    }
+  if (role) {
+    instructions += `\n\n--- 用户自定义 Agent 配置（优先遵循） ---\n\n## 角色设定\n${role}`;
   }
 
   // 注入用户核心记忆（来自 Vercel Blob Store 的 markdown）
@@ -229,6 +240,13 @@ export function createTaskAgent(
       },
     },
     tools: {
+      // 客户端工具：无 execute，agent 调用后循环暂停，
+      // 由 chat-panel 渲染提问面板收集回答，再通过 addToolOutput 回传结果
+      askQuestions: tool({
+        description:
+          "向用户提问并等待回答。当用户需求模糊、缺失的信息会显著影响最终生成效果、且无法根据上下文/记忆/常识自主决策时调用。一次可提 1-5 个问题，每个问题附 2-6 个候选选项（用户也可自由输入）。用户回答或 3 分钟超时后返回结果；answers 中 answer 为「未回答」、timedOut=true（超时）或 skipped=true（用户跳过）时，按最合理方案自主决策继续，不要再次追问同一问题。能自主决策时不要调用本工具。",
+        inputSchema: askQuestionsInputSchema,
+      }),
       searchTasks: tool({
         description:
           "按标题关键词搜索任务，无需知道任务 id。可在某天内或全日期范围搜索，返回按相关度排序的匹配结果（含 id、所属日期 date、标题、完成状态）。用于根据用户描述找到对应任务后再操作。",

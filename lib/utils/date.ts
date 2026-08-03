@@ -43,3 +43,20 @@ export function getWeekDates(date: Date): Date[] {
 
 /** 周一到周日的中文标签（与 getWeekDates 顺序一致） */
 export const WEEKDAY_LABELS = ["一", "二", "三", "四", "五", "六", "日"];
+
+/** ISO 时间转 datetime-local 输入框值（YYYY-MM-DDTHH:mm） */
+export function isoToLocalInput(iso: string | undefined): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  const hh = String(d.getHours()).padStart(2, "0");
+  const min = String(d.getMinutes()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}T${hh}:${min}`;
+}
+
+/** datetime-local 输入框值转 ISO 字符串 */
+export function localInputToIso(local: string): string {
+  return new Date(local).toISOString();
+}

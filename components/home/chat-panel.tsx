@@ -1,38 +1,27 @@
 "use client";
 
-import {
-  useDeferredValue,
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import useSWR, { useSWRConfig } from "swr";
 import { useChat } from "@ai-sdk/react";
 import { DefaultChatTransport, type UIMessage } from "ai";
-import {
-  Bot,
-  Check,
-  Copy,
-  Layers,
-  Mic,
-  Paperclip,
-  RefreshCw,
-  Send,
-  Square,
-  Trash2,
-  X,
-} from "lucide-react";
+import { Bot, Check, Copy, RefreshCw, Trash2 } from "lucide-react";
 import { MessageItem } from "@/components/home/message-item";
+import { AskQuestionsPanel } from "@/components/home/ask-questions-panel";
+import { ChatInput, type SendParams } from "@/components/home/chat-input";
+import { TaskDiffView } from "@/components/home/task-diff-view";
+import { computeMessageTaskDiff } from "@/lib/home/task-diff";
 import { useHomeStore } from "@/lib/home/store";
 import { Button } from "@/components/ui/button";
 import { cn, fetcher } from "@/lib/utils";
 import {
-  HISTORY_LOAD_BATCH,
   SYSTEM_TRIGGER_PREFIX,
   type TasksResponse,
 } from "@/lib/home/constants";
+import type {
+  AskQuestionsAnswer,
+  AskQuestionsInput,
+  AskQuestionsOutput,
+} from "@/lib/ai/ask-questions";
 import type {
   ConversationRow,
   TaskSegment,
@@ -41,18 +30,11 @@ import type {
 import type { UserPreferences } from "@/lib/db/schema";
 import { idbGet, idbSet, idbDelete } from "@/lib/idb";
 import {
-  InputGroup,
-  InputGroupAddon,
-  InputGroupButton,
-  InputGroupTextarea,
-} from "@/components/ui/input-group";
-import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { useRecording } from "@/hooks/use-recording";
-import { useDroppable } from "@dnd-kit/react";
+import { useMessageScroll } from "@/hooks/use-message-scroll";
 
 type ConversationResponse = { conversation: ConversationRow | null };
 
@@ -61,11 +43,12 @@ type ConversationResponse = { conversation: ConversationRow | null };
  *
  * 私有状态（仅 ChatPanel 内部使用，不进 store）：
  * - useChat（messages / sendMessage / status / stop / setMessages）
- * - input（输入框文本）
  * - conversationId（当前对话 ID）
  * - hiddenCount（折叠的旧消息数量，上滑加载更多时释放）
  * - messageDates（每条消息对应的日期，用于日期分割线）
  * - 各类滚动 ref
+ *
+ * 输入相关逻辑（contenteditable editor、@ 引用、附件、语音）已抽离到 ChatInput 组件。
  *
  * 从 store 读取：today、clearConversationNonce（外部清空信号）
  * SWR：/api/conversations（历史对话加载）
@@ -74,17 +57,7 @@ type ConversationResponse = { conversation: ConversationRow | null };
 export function ChatPanel() {
   const today = useHomeStore((s) => s.today);
   const clearNonce = useHomeStore((s) => s.clearConversationNonce);
-  const chatTaskRefs = useHomeStore((s) => s.chatTaskRefs);
-  const removeChatTaskRef = useHomeStore((s) => s.removeChatTaskRef);
-  const clearChatTaskRefs = useHomeStore((s) => s.clearChatTaskRefs);
-  const addChatTaskRef = useHomeStore((s) => s.addChatTaskRef);
   const { mutate: globalMutate } = useSWRConfig();
-
-  // 对话输入区作为拖拽放置目标：拖入任务可添加为 agent 参考（dnd-kit）
-  const { ref: chatDropRef, isDropTarget: isChatDropTarget } = useDroppable({
-    id: "chat-input",
-    accept: "task",
-  });
 
   // --- useChat ---
   // 仅发送最后一条 message（含 createdAt 元数据），服务端从 DB 加载历史消息
@@ -93,18 +66,35 @@ export function ChatPanel() {
       new DefaultChatTransport({
         prepareSendMessagesRequest: ({ messages, body }) => {
           const last = messages[messages.length - 1]!;
-          // 为用户消息补充 createdAt（assistant 消息由服务端 messageMetadata 注入）
-          const messageWithMeta = {
-            ...last,
-            metadata: {
-              ...(last.metadata ?? {}),
-              createdAt: new Date().toISOString(),
-            },
-          };
+          // 为用户消息补充 createdAt（assistant 消息由服务端 messageMetadata 注入；
+          // 已带 createdAt 的消息——如重新生成——保持原值）
+          const lastMeta = last.metadata as { createdAt?: string } | undefined;
+          const messageWithMeta =
+            last.role === "user" && !lastMeta?.createdAt
+              ? {
+                  ...last,
+                  metadata: {
+                    ...(last.metadata ?? {}),
+                    createdAt: new Date().toISOString(),
+                  },
+                }
+              : last;
+          // 上一条 assistant 消息含 askQuestions 工具部分时随请求一并发送：
+          // 用户在提问悬置期间直接发新消息，客户端已先为该提问填入「跳过」输出，
+          // 服务端据此原位替换历史消息，避免遗留无结果的工具调用
+          const prev =
+            messages.length > 1 ? messages[messages.length - 2] : null;
+          const toolContext =
+            prev &&
+            prev.role === "assistant" &&
+            prev.parts.some((p) => p.type === "tool-askQuestions")
+              ? prev
+              : undefined;
           return {
             body: {
               ...body,
               message: messageWithMeta,
+              toolContext,
               today,
               now: new Date().toISOString(),
             },
@@ -122,40 +112,58 @@ export function ChatPanel() {
     stop,
     error,
     setMessages,
-  } = useChat({ transport });
+    addToolOutput,
+  } = useChat({
+    transport,
+    // 提问面板提交回答（skipped=false）后自动继续对话；
+    // 用户跳过提问（skipped=true）时不触发，由其发送的新消息驱动。
+    // 同一条 assistant 消息可能含多个工具调用（含多次提问），
+    // 必须全部有结果才自动提交，避免遗留无结果的工具调用
+    sendAutomaticallyWhen: ({ messages: chatMessages }) => {
+      const last = chatMessages[chatMessages.length - 1];
+      if (!last || last.role !== "assistant") return false;
+      let hasAnsweredAsk = false;
+      for (const p of last.parts) {
+        if (
+          typeof p.type !== "string" ||
+          !p.type.startsWith("tool-") ||
+          p.type === "tool-dynamic-tool"
+        )
+          continue;
+        const part = p as { state?: string; output?: AskQuestionsOutput };
+        if (part.state !== "output-available" && part.state !== "output-error")
+          return false;
+        if (p.type === "tool-askQuestions" && part.output?.skipped === false) {
+          hasAnsweredAsk = true;
+        }
+      }
+      return hasAnsweredAsk;
+    },
+  });
 
   // useDeferredValue：工具调用流式时 parsePartialJson 每 token 阻塞主线程，
   // 用 deferred 延迟渲染让浏览器在 token 间隙能响应用户输入。
   // 保存对话的 effect 用 rawMessages 确保数据实时性。
   const messages = useDeferredValue(rawMessages);
 
+  // --- 消息滚动：折叠/吸底/上滑加载更多，全部抽离到 useMessageScroll ---
+  const {
+    scrollRef,
+    contentRef,
+    hiddenCount,
+    handleScroll,
+    reset: resetScroll,
+  } = useMessageScroll({ messages, today });
+
   // --- 私有状态 ---
-  const [input, setInput] = useState("");
   const [conversationId, setConversationId] = useState<string | null>(null);
   // 删除模式：显示 checkbox 供用户选择要删除的 message
   const [deleteMode, setDeleteMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   // 复制成功反馈
   const [copied, setCopied] = useState(false);
-  const foldKey = `heyterx:fold:${today}`;
-  const [hiddenCount, setHiddenCount] = useState(() => {
-    if (typeof window === "undefined") return 0;
-    const stored = window.localStorage?.getItem(`heyterx:fold:${today}`);
-    const n = stored ? parseInt(stored, 10) : 0;
-    return Number.isFinite(n) && n > 0 ? n : 0;
-  });
   // 防止新一天问候在 sendMessage 与 setMessages 竞态下重复触发
   const greetingInFlightRef = useRef(false);
-
-  // --- 滚动 ref ---
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const contentRef = useRef<HTMLDivElement | null>(null);
-  const autoStickRef = useRef(true);
-  const pendingScrollRestoreRef = useRef<{
-    prevScrollHeight: number;
-    prevScrollTop: number;
-  } | null>(null);
-  const loadingMoreRef = useRef(false);
 
   // --- 消息日期 ---
   const messageDatesRef = useRef<Record<string, string>>({});
@@ -168,7 +176,7 @@ export function ChatPanel() {
     { revalidateOnFocus: false, revalidateOnReconnect: false },
   );
 
-  // --- SWR：用户偏好（用于判断当前默认模型是否多模态） ---
+  // --- SWR：用户偏好（用于判断当前默认模型是否多模态、问候是否开启） ---
   const { data: prefsData } = useSWR<{ preferences: UserPreferences }>(
     "/api/preferences",
     fetcher,
@@ -180,71 +188,9 @@ export function ChatPanel() {
     const cfg = configs.find((c) => c.id === defaultModelId);
     return cfg?.multimodal ?? false;
   }, [prefsData, defaultModelId]);
-
-  // --- 附件管理 ---
-  type PendingAttachment = {
-    id: string;
-    file: File;
-    dataUrl: string; // object URL for preview
-    mediaType: string;
-  };
-  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-
-  const addFiles = (files: FileList | File[]) => {
-    const arr = Array.from(files);
-    const next: PendingAttachment[] = arr.map((f) => ({
-      id: `att_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
-      file: f,
-      dataUrl: URL.createObjectURL(f),
-      mediaType: f.type || "application/octet-stream",
-    }));
-    setAttachments((prev) => [...prev, ...next]);
-  };
-  const removeAttachment = (id: string) => {
-    setAttachments((prev) => {
-      const found = prev.find((a) => a.id === id);
-      if (found) URL.revokeObjectURL(found.dataUrl);
-      return prev.filter((a) => a.id !== id);
-    });
-  };
-
-  // --- 语音输入 ---
-  const [transcribing, setTranscribing] = useState(false);
-  const {
-    recording,
-    start: startRecording,
-    stop: stopRecording,
-  } = useRecording({
-    onStop: async (blob) => {
-      setTranscribing(true);
-
-      try {
-        const form = new FormData();
-        form.append("file", blob, "voice.wav");
-        const res = await fetch("/api/transcribe", {
-          method: "POST",
-          body: form,
-        });
-        const data = await res.json();
-        if (data?.text) {
-          setInput((prev) => (prev ? `${prev} ${data.text}` : data.text));
-        }
-      } catch {
-        // 静默失败，不影响输入
-      } finally {
-        setTranscribing(false);
-      }
-    },
-  });
-
-  useEffect(() => {
-    return () => {
-      // 卸载时释放资源
-      attachments.forEach((a) => URL.revokeObjectURL(a.dataUrl));
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // 用户偏好：新一天问候开关（默认 true）
+  const greetingEnabled =
+    prefsData?.preferences.agent.behavior?.greetingEnabled ?? true;
 
   // --- 同步 ref ---
   const wasStreamingRef = useRef(false);
@@ -273,18 +219,12 @@ export function ChatPanel() {
   const resetConversationLocal = () => {
     setMessages([]);
     setConversationId(null);
-    setHiddenCount(0);
     setDeleteMode(false);
     setSelectedIds(new Set());
     greetingInFlightRef.current = false;
-    if (typeof window !== "undefined") {
-      window.localStorage?.removeItem(foldKey);
-    }
     messageDatesRef.current = {};
     setMessageDates({});
-    autoStickRef.current = true;
-    pendingScrollRestoreRef.current = null;
-    loadingMoreRef.current = false;
+    resetScroll();
     lastSyncedTasksRef.current = null;
     lastSyncedSegsRef.current = null;
     displayedUpdatedAtRef.current = null;
@@ -335,6 +275,7 @@ export function ChatPanel() {
         typeof window !== "undefined" &&
         window.localStorage?.getItem(greetedKey) === "1";
       if (
+        greetingEnabled &&
         lastDateStr < today &&
         !alreadyGreeted &&
         !greetingInFlightRef.current
@@ -385,8 +326,19 @@ export function ChatPanel() {
     const lastIso = convData.conversation.updatedAt as unknown;
     const serverUpdatedAt =
       typeof lastIso === "string" ? lastIso : new Date().toISOString();
-    // 已展示相同版本 → 跳过（indexedDB 缓存已足够）
-    if (displayedUpdatedAtRef.current === serverUpdatedAt) return;
+    // 流式进行中不应用服务端数据：此时本地已领先于服务端（如正在生成的新一天
+    // 问候），应用旧数据会覆盖本地消息状态并冲掉 indexedDB 缓存。
+    // status 变化会重新触发本 effect，流式结束后再做下面的版本比对
+    if (status === "submitted" || status === "streaming") return;
+    // 仅当服务端版本「更新」时才应用。displayedUpdatedAtRef 与 idb 缓存使用的
+    // 是客户端生成的时间戳，与服务端 updatedAt 字符串必然不相等，必须按时间
+    // 先后比较（ISO 字符串字典序即时间序），否则服务端旧数据会覆盖本地较新
+    // 的对话（如刚完成的新一天问候）并覆写 indexedDB 缓存为旧数据
+    if (
+      displayedUpdatedAtRef.current !== null &&
+      displayedUpdatedAtRef.current >= serverUpdatedAt
+    )
+      return;
     displayedUpdatedAtRef.current = serverUpdatedAt;
     applyConversationData({
       id: convData.conversation.id,
@@ -400,7 +352,7 @@ export function ChatPanel() {
       updatedAt: serverUpdatedAt,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [convData, setMessages, sendMessage, today]);
+  }, [convData, setMessages, sendMessage, today, status]);
 
   // --- 流式结束后同步缓存 ---
   // 对话已由服务端 onEnd 保存，前端仅需刷新任务缓存与 indexedDB 本地缓存。
@@ -465,39 +417,6 @@ export function ChatPanel() {
       setMessageDates(next);
     }
   }, [messages, today, status]);
-
-  // --- 自动吸底 ---
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el || !autoStickRef.current) return;
-    el.scrollTop = el.scrollHeight;
-  }, [messages]);
-
-  // --- 内容尺寸变化时跟随吸底 ---
-  useEffect(() => {
-    const el = scrollRef.current;
-    const content = contentRef.current;
-    if (!el || !content || typeof ResizeObserver === "undefined") return;
-    const ro = new ResizeObserver(() => {
-      if (autoStickRef.current) {
-        el.scrollTop = el.scrollHeight;
-      }
-    });
-    ro.observe(content);
-    return () => ro.disconnect();
-  }, []);
-
-  // --- 上滑加载更多后还原视口位置 ---
-  useLayoutEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const restore = pendingScrollRestoreRef.current;
-    if (!restore) return;
-    pendingScrollRestoreRef.current = null;
-    const added = el.scrollHeight - restore.prevScrollHeight;
-    el.scrollTop = restore.prevScrollTop + added;
-    loadingMoreRef.current = false;
-  }, [hiddenCount]);
 
   // --- 同步工具输出到 tasks SWR 缓存 ---
   // 流式期间每 token 触发一次 messages 更新，但只有最后一条 message 引用变化。
@@ -616,31 +535,66 @@ export function ChatPanel() {
     [messages, hiddenCount],
   );
 
-  // --- 滚动事件 ---
-  const handleConversationScroll = () => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 32;
-    autoStickRef.current = atBottom;
-    if (el.scrollTop < 50 && hiddenCount > 0 && !loadingMoreRef.current) {
-      loadingMoreRef.current = true;
-      pendingScrollRestoreRef.current = {
-        prevScrollHeight: el.scrollHeight,
-        prevScrollTop: el.scrollTop,
+  // --- agent 提问（askQuestions 客户端工具） ---
+  // 最后一条 assistant 消息中存在 input-available 状态的 askQuestions 调用时，
+  // 在输入框上方浮动显示提问面板等待用户作答；同一条消息可能含多次提问，逐个处理
+  const pendingAsks = useMemo(() => {
+    const last = messages[messages.length - 1];
+    if (!last || last.role !== "assistant") return [];
+    const list: {
+      toolCallId: string;
+      questions: AskQuestionsInput["questions"];
+    }[] = [];
+    for (const part of last.parts) {
+      if (part.type !== "tool-askQuestions") continue;
+      const p = part as {
+        state?: string;
+        toolCallId?: string;
+        input?: AskQuestionsInput;
       };
-      setHiddenCount((c) => Math.max(0, c - HISTORY_LOAD_BATCH));
-      if (typeof window !== "undefined") {
-        const remain = Math.max(0, hiddenCount - HISTORY_LOAD_BATCH);
-        if (remain > 0) {
-          window.localStorage?.setItem(foldKey, String(remain));
-        } else {
-          window.localStorage?.removeItem(foldKey);
-        }
+      if (
+        p.state === "input-available" &&
+        p.toolCallId &&
+        p.input?.questions?.length
+      ) {
+        list.push({ toolCallId: p.toolCallId, questions: p.input.questions });
       }
     }
+    return list;
+  }, [messages]);
+  const pendingAsk = pendingAsks[0] ?? null;
+
+  /** 提问面板提交/超时：把回答写入工具输出，sendAutomaticallyWhen 会自动继续对话 */
+  const handleAskSubmit = (
+    answers: AskQuestionsAnswer[],
+    timedOut: boolean,
+  ) => {
+    if (!pendingAsk) return;
+    addToolOutput({
+      tool: "askQuestions",
+      toolCallId: pendingAsk.toolCallId,
+      output: {
+        answers,
+        timedOut,
+        skipped: false,
+      } satisfies AskQuestionsOutput,
+    });
   };
 
   const busy = status === "submitted" || status === "streaming";
+
+  // --- 任务变更 diff：agent 完成回答后，展示该回答中修改/创建任务的变更 ---
+  const lastVisibleMessage = visibleMessages[visibleMessages.length - 1];
+  const lastTaskDiff = useMemo(() => {
+    if (
+      busy ||
+      !lastVisibleMessage ||
+      lastVisibleMessage.role !== "assistant"
+    ) {
+      return [];
+    }
+    return computeMessageTaskDiff(lastVisibleMessage, today);
+  }, [busy, lastVisibleMessage, today]);
 
   // --- 对话操作：复制 / 删除 / 重新生成 ---
   const toggleSelect = (id: string) => {
@@ -712,53 +666,32 @@ export function ChatPanel() {
     regenerate();
   };
 
-  const submit = () => {
-    const text = input.trim();
-    const hasAttachments = attachments.length > 0;
-    const hasTaskRefs = chatTaskRefs.length > 0;
-    if ((!text && !hasAttachments && !hasTaskRefs) || busy) return;
-    // 多模态附件：转 FileUIPart 传给 sendMessage 的 files
-    const files = attachments.map((a) => ({
-      type: "file" as const,
-      mediaType: a.mediaType,
-      filename: a.file.name,
-      url: a.dataUrl,
-    }));
-    // 任务参考：作为前缀拼入消息文本，让 agent 知道用户引用了哪些任务
-    let messageText = text;
-    if (hasTaskRefs) {
-      const refList = chatTaskRefs
-        .map((r) => `- ${r.title}（日期: ${r.date}，ID: ${r.taskId}）`)
-        .join("\n");
-      messageText = `【参考任务】\n${refList}\n\n${
-        text || "请参考以上任务信息来处理我的请求"
-      }`;
+  /**
+   * ChatInput 提交回调：用户点击发送 / 按 Enter 时触发。
+   * params.text 已由 ChatInput 拼入 @ 引用上下文，params.files 为多模态附件。
+   * 有悬置的 agent 提问时先全部自动跳过（填入 skipped 输出），
+   * 避免历史消息中遗留无结果的工具调用导致后续请求校验失败。
+   */
+  const handleSend = async (params: SendParams) => {
+    if (busy) return;
+    for (const ask of pendingAsks) {
+      await addToolOutput({
+        tool: "askQuestions",
+        toolCallId: ask.toolCallId,
+        output: {
+          answers: [],
+          timedOut: false,
+          skipped: true,
+        } satisfies AskQuestionsOutput,
+      });
     }
     sendMessage(
       {
-        text: messageText || (hasAttachments ? "（请查看附件）" : ""),
-        ...(hasAttachments ? { files } : {}),
+        text: params.text,
+        ...(params.files.length > 0 ? { files: params.files } : {}),
       },
       {},
     );
-    setInput("");
-    // 清理附件 object URL
-    attachments.forEach((a) => URL.revokeObjectURL(a.dataUrl));
-    setAttachments([]);
-    if (hasTaskRefs) clearChatTaskRefs();
-  };
-
-  const handleSubmit = (e: React.SubmitEvent) => {
-    e.preventDefault();
-    submit();
-  };
-
-  // Enter 发送，Shift+Enter 换行；输入法组合中（composing）不触发
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-      e.preventDefault();
-      submit();
-    }
   };
 
   return (
@@ -768,12 +701,17 @@ export function ChatPanel() {
         <h2 className="text-sm font-medium">Agent</h2>
       </div>
       <div className="mx-auto flex h-full w-full max-w-3xl min-h-0 flex-col px-6 py-4">
-        <div
-          ref={scrollRef}
-          onScroll={handleConversationScroll}
-          className="min-h-0 flex-1 overflow-y-auto pr-2"
-        >
-          <div ref={contentRef} className="space-y-3">
+        {/* 消息滚动区 + 悬浮层容器（提问面板绝对定位于其上） */}
+        <div className="relative min-h-0 flex-1">
+          <div
+            ref={scrollRef}
+            onScroll={handleScroll}
+            className="h-full overflow-y-auto pr-2"
+          >
+            <div
+              ref={contentRef}
+              className={cn("space-y-3", pendingAsk && "pb-64")}
+            >
             {visibleMessages.map((msg, idx) => {
               const dateStr = messageDates[msg.id] ?? today;
               const prevDateStr =
@@ -794,6 +732,10 @@ export function ChatPanel() {
                 />
               );
             })}
+            {/* 任务变更 diff：agent 回答下方、消息 action 上方，可折叠（默认折叠） */}
+            {lastTaskDiff.length > 0 && !deleteMode && (
+              <TaskDiffView diffs={lastTaskDiff} today={today} />
+            )}
             {/* Action 栏：非流式 + 有对话 + 最后一条是 assistant 时显示 */}
             {!busy &&
               visibleMessages.length > 0 &&
@@ -901,7 +843,20 @@ export function ChatPanel() {
                 </div>
               </div>
             )}
+            </div>
           </div>
+
+          {/* agent 提问面板：悬浮于消息滚动容器之上（不占布局宽度），
+              3 分钟未答自动提交 */}
+          {pendingAsk && (
+            <div className="absolute inset-x-2 bottom-2 z-10 sm:left-auto sm:w-96">
+              <AskQuestionsPanel
+                key={pendingAsk.toolCallId}
+                questions={pendingAsk.questions}
+                onSubmit={handleAskSubmit}
+              />
+            </div>
+          )}
         </div>
 
         {error && (
@@ -910,189 +865,12 @@ export function ChatPanel() {
           </p>
         )}
 
-        <form ref={chatDropRef} className="mt-3" onSubmit={handleSubmit}>
-          <InputGroup
-            className={cn(
-              isChatDropTarget && "border-ring ring-3 ring-ring/50",
-            )}
-          >
-            <InputGroupTextarea
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="例如「把今天的 t3 标记为完成」或「明天加一个任务：买菜」"
-              rows={1}
-              className="max-h-40 min-h-9 resize-none rounded-2xl bg-background py-2.5 pr-12 text-sm leading-snug"
-            />
-            {/* 拖入的任务参考预览 */}
-            {chatTaskRefs.length > 0 && (
-              <InputGroupAddon align="block-start" className="px-2 pt-2">
-                <div className="flex flex-wrap gap-2">
-                  {chatTaskRefs.map((ref) => (
-                    <div
-                      key={ref.id}
-                      className="group flex items-center gap-1 rounded-md border bg-muted px-2 py-1 text-[11px]"
-                    >
-                      <Layers className="size-3 shrink-0 text-muted-foreground" />
-                      <span className="max-w-32 truncate">{ref.title}</span>
-                      <span className="text-[10px] text-muted-foreground">
-                        {ref.date}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => removeChatTaskRef(ref.id)}
-                        className="ml-0.5 text-muted-foreground hover:text-foreground"
-                        aria-label="移除任务参考"
-                      >
-                        <X className="size-3" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </InputGroupAddon>
-            )}
-            {/* 多模态附件预览 */}
-            {attachments.length > 0 && (
-              <InputGroupAddon align="block-start" className="px-2 pt-2">
-                <div className="flex flex-wrap gap-2">
-                  {attachments.map((a) => {
-                    const top = a.mediaType.split("/")[0];
-                    return (
-                      <div
-                        key={a.id}
-                        className="group relative size-16 overflow-hidden rounded-md border bg-muted"
-                      >
-                        {top === "image" ? (
-                          // eslint-disable-next-line @next/next/no-img-element
-                          <img
-                            src={a.dataUrl}
-                            alt={a.file.name}
-                            className="size-full object-cover"
-                          />
-                        ) : (
-                          <div className="flex size-full flex-col items-center justify-center gap-0.5 p-1 text-[10px] text-muted-foreground">
-                            <Paperclip className="size-3.5" />
-                            <span className="w-full truncate text-center">
-                              {a.file.name}
-                            </span>
-                          </div>
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => removeAttachment(a.id)}
-                          className="absolute right-0.5 top-0.5 flex size-4 items-center justify-center rounded-full bg-background/80 text-foreground opacity-0 transition-opacity group-hover:opacity-100"
-                          aria-label="移除附件"
-                        >
-                          <X className="size-3" />
-                        </button>
-                      </div>
-                    );
-                  })}
-                </div>
-              </InputGroupAddon>
-            )}
-            <InputGroupAddon align="block-end" className="justify-between pt-1">
-              <div className="flex items-center gap-1">
-                {/* 附件按钮（非多模态模型禁用） */}
-                <Tooltip>
-                  <TooltipTrigger
-                    render={
-                      <InputGroupButton
-                        type="button"
-                        variant="ghost"
-                        size="icon-sm"
-                        aria-label={
-                          currentModelMultimodal
-                            ? "上传附件"
-                            : "当前模型不支持多模态附件"
-                        }
-                        disabled={!currentModelMultimodal}
-                        onClick={() => fileInputRef.current?.click()}
-                        className="size-7 disabled:pointer-events-auto"
-                      />
-                    }
-                  >
-                    <Paperclip className="size-3.5" />
-                  </TooltipTrigger>
-                  <TooltipContent>
-                    {currentModelMultimodal
-                      ? "上传附件"
-                      : "当前模型不支持多模态附件"}
-                  </TooltipContent>
-                </Tooltip>
-                {/* 语音输入按钮 */}
-                <Tooltip>
-                  <TooltipTrigger
-                    render={
-                      <InputGroupButton
-                        type="button"
-                        variant={recording ? "destructive" : "ghost"}
-                        size="icon-sm"
-                        aria-label={recording ? "停止录音" : "语音输入"}
-                        onClick={() =>
-                          recording ? stopRecording() : startRecording()
-                        }
-                        disabled={transcribing || busy}
-                        className="size-7"
-                      />
-                    }
-                  >
-                    {transcribing ? (
-                      <span className="size-3.5 animate-pulse">…</span>
-                    ) : (
-                      <Mic className="size-3.5" />
-                    )}
-                  </TooltipTrigger>
-                  <TooltipContent>
-                    {transcribing
-                      ? "识别中…"
-                      : recording
-                        ? "停止录音"
-                        : "语音输入"}
-                  </TooltipContent>
-                </Tooltip>
-              </div>
-              {busy ? (
-                <InputGroupButton
-                  type="button"
-                  variant="outline"
-                  size="icon-sm"
-                  aria-label="停止"
-                  onClick={() => stop()}
-                  className="size-7"
-                >
-                  <Square className="size-3.5" />
-                </InputGroupButton>
-              ) : (
-                <InputGroupButton
-                  type="submit"
-                  variant="default"
-                  size="icon-sm"
-                  aria-label="发送"
-                  disabled={
-                    !input.trim() &&
-                    attachments.length === 0 &&
-                    chatTaskRefs.length === 0
-                  }
-                  className="size-7"
-                >
-                  <Send className="size-3.5" />
-                </InputGroupButton>
-              )}
-            </InputGroupAddon>
-          </InputGroup>
-          <input
-            ref={fileInputRef}
-            type="file"
-            multiple
-            className="hidden"
-            accept="image/*,audio/*,video/*"
-            onChange={(e) => {
-              if (e.target.files) addFiles(e.target.files);
-              e.target.value = "";
-            }}
-          />
-        </form>
+        <ChatInput
+          busy={busy}
+          currentModelMultimodal={currentModelMultimodal}
+          onSend={handleSend}
+          onStop={stop}
+        />
       </div>
     </section>
   );

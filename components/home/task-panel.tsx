@@ -58,6 +58,10 @@ import { Input } from "@/components/ui/input";
 import { cn, date } from "@/lib/utils";
 import { useHomeStore } from "@/lib/home/store";
 import { useTasks } from "@/lib/home/use-tasks";
+import {
+  deleteTaskById,
+  patchTaskFields,
+} from "@/lib/home/task-mutations";
 import { TaskBadges } from "@/components/home/reports";
 import { WeekCalendar } from "@/components/home/week-calendar";
 import {
@@ -78,23 +82,6 @@ import { Feedback } from "@dnd-kit/dom";
 import { CollisionPriority } from "@dnd-kit/abstract";
 
 export type ViewMode = "list" | "quadrant";
-
-/** ISO 时间转 datetime-local 输入框值（YYYY-MM-DDTHH:mm） */
-function isoToLocalInput(iso: string | undefined): string {
-  if (!iso) return "";
-  const d = new Date(iso);
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  const hh = String(d.getHours()).padStart(2, "0");
-  const min = String(d.getMinutes()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd}T${hh}:${min}`;
-}
-
-/** datetime-local 输入框值转 ISO 字符串 */
-function localInputToIso(local: string): string {
-  return new Date(local).toISOString();
-}
 
 /**
  * 任务下方的扩展徽章：任务段标识 + 自定义标签 + 提醒时间。
@@ -160,6 +147,7 @@ type EditState = { task: Task; date: string; mode: EditMode } | null;
 /**
  * 任务卡片共享渲染层：负责布局、复选框、徽章、右键上下文菜单。
  * 拖拽通过 dnd-kit useSortable 实现：外层传入 dragRef 和 isDragging。
+ * 单击卡片（非复选框区域）打开右侧任务编辑面板；复选框点击仍为切换完成状态。
  */
 function TaskCardShell({
   task,
@@ -186,6 +174,7 @@ function TaskCardShell({
   onCheck: (task: Task, next: boolean, date: string) => void;
   onEdit: (mode: EditMode, task: Task, date: string) => void;
 }) {
+  const openTaskEditor = useHomeStore((s) => s.openTaskEditor);
   const isList = variant === "list";
   const canEdit = !isPastDay;
   const canDelete = !isPastDay || !task.done;
@@ -193,12 +182,16 @@ function TaskCardShell({
 
   const cardContent = (
     <>
-      <Checkbox
-        checked={task.done}
-        onCheckedChange={(v) => onCheck(task, v === true, taskDate)}
-        className={cn("mt-0.5", isList ? "size-5" : "size-4")}
-        disabled={isPastDay}
-      />
+      {/* 复选框点击不冒泡：避免触发卡片的「打开编辑面板」 */}
+      {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions, jsx-a11y/click-events-have-key-events */}
+      <span onClick={(e) => e.stopPropagation()} className="inline-flex">
+        <Checkbox
+          checked={task.done}
+          onCheckedChange={(v) => onCheck(task, v === true, taskDate)}
+          className={cn("mt-0.5", isList ? "size-5" : "size-4")}
+          disabled={isPastDay}
+        />
+      </span>
       <div className="flex flex-1 flex-col gap-1">
         <span
           className={cn(
@@ -216,6 +209,11 @@ function TaskCardShell({
     </>
   );
 
+  // 单击打开任务编辑面板（仅可编辑的非过去任务）
+  const handleCardClick = canEdit
+    ? () => openTaskEditor(task.id, taskDate)
+    : undefined;
+
   const labelClass = cn(
     "flex w-full items-start gap-3 transition-colors",
     isList ? "rounded-lg px-3 py-2.5" : "rounded-md px-2 py-1.5",
@@ -226,16 +224,20 @@ function TaskCardShell({
 
   if (!hasMenu) {
     return (
-      <label ref={dragRef} className={labelClass}>
+      // eslint-disable-next-line jsx-a11y/no-static-element-interactions, jsx-a11y/click-events-have-key-events
+      <div ref={dragRef} className={labelClass} onClick={handleCardClick}>
         {cardContent}
-      </label>
+      </div>
     );
   }
 
   return (
     <ContextMenu>
       <ContextMenuTrigger
-        render={<label ref={dragRef} className={labelClass} />}
+        render={
+          // eslint-disable-next-line jsx-a11y/no-static-element-interactions, jsx-a11y/click-events-have-key-events
+          <div ref={dragRef} className={labelClass} onClick={handleCardClick} />
+        }
         className={labelClass}
       >
         {cardContent}
@@ -672,7 +674,7 @@ function TaskEditDialogs({
     reminderTaskRef.current?.task !== editState.task
   ) {
     reminderTaskRef.current = editState;
-    setReminderValue(isoToLocalInput(editState.task.reminderAt));
+    setReminderValue(date.isoToLocalInput(editState.task.reminderAt));
   }
 
   // --- tags ---
@@ -696,7 +698,7 @@ function TaskEditDialogs({
 
   const submitReminder = () => {
     if (!editState) return;
-    const iso = reminderValue ? localInputToIso(reminderValue) : null;
+    const iso = reminderValue ? date.localInputToIso(reminderValue) : null;
     onSetReminder(editState.task.id, editState.date, iso);
     onClose();
   };
@@ -1035,71 +1037,17 @@ export function TaskPanel() {
     if (entry) void toggleTask(entry.task.id, false, entry.date);
   };
 
-  /** 乐观更新任务字段 + PATCH 服务端 */
-  const patchTaskFields = async (
+  /** 乐观更新任务字段 + PATCH 服务端（共享实现） */
+  const patchFields = (
     taskDate: string,
     taskId: string,
     fields: Partial<Task>,
     body: Record<string, unknown>,
-  ) => {
-    mutateTasks(
-      (prev) => {
-        if (!prev) return prev;
-        const list = prev.tasksByDate[taskDate] ?? [];
-        return {
-          ...prev,
-          tasksByDate: {
-            ...prev.tasksByDate,
-            [taskDate]: list.map((t) =>
-              t.id === taskId ? { ...t, ...fields } : t,
-            ),
-          },
-        };
-      },
-      { revalidate: false },
-    );
-    try {
-      const res = await fetch("/api/tasks", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: taskId, ...body }),
-      });
-      if (!res.ok) throw new Error(`PATCH failed: ${res.status}`);
-    } catch {
-      mutateTasks();
-      toast.error("保存失败，请重试");
-    }
-  };
+  ) => patchTaskFields(mutateTasks, taskDate, taskId, fields, body);
 
-  /** 乐观删除任务 + DELETE 服务端 */
-  const deleteTask = async (taskDate: string, taskId: string) => {
-    mutateTasks(
-      (prev) => {
-        if (!prev) return prev;
-        const list = prev.tasksByDate[taskDate] ?? [];
-        return {
-          ...prev,
-          tasksByDate: {
-            ...prev.tasksByDate,
-            [taskDate]: list.filter((t) => t.id !== taskId),
-          },
-        };
-      },
-      { revalidate: false },
-    );
-    try {
-      const res = await fetch("/api/tasks", {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: taskId }),
-      });
-      if (!res.ok) throw new Error(`DELETE failed: ${res.status}`);
-      toast.success("已删除");
-    } catch {
-      mutateTasks();
-      toast.error("删除失败，请重试");
-    }
-  };
+  /** 乐观删除任务 + DELETE 服务端（共享实现） */
+  const deleteTask = (taskDate: string, taskId: string) =>
+    deleteTaskById(mutateTasks, taskDate, taskId);
 
   const handleEdit = (mode: EditMode, task: Task, taskDate: string) => {
     setEditState({ task, date: taskDate, mode });
@@ -1135,7 +1083,10 @@ export function TaskPanel() {
     <>
       <div className="flex flex-1 min-h-0 w-full flex-col xl:flex-row">
         <WeekCalendar />
-        <ScrollArea className="flex-1 h-screen xl:min-w-0">
+        {/* 竖直（flex-col）模式下由 flex-1 + min-h-0 占据剩余高度；
+            不要用 h-screen——100vh 不含头部/日历高度，会导致底部内容被推出可视区，
+            滚动到最底部仍显示不全。xl 横向模式下由 stretch 自动撑满交叉轴高度 */}
+        <ScrollArea className="min-h-0 flex-1 xl:min-w-0">
           <div className="w-full px-4 pb-8 pt-4 sm:px-6">
             <div className="mb-3 flex items-baseline justify-between gap-2">
               <div className="flex items-baseline gap-2">
@@ -1472,10 +1423,10 @@ export function TaskPanel() {
           allTags={allTags}
           onClose={() => setEditState(null)}
           onRename={(taskId, d, title) =>
-            patchTaskFields(d, taskId, { title }, { title })
+            patchFields(d, taskId, { title }, { title })
           }
           onSetReminder={(taskId, d, reminderAt) =>
-            patchTaskFields(
+            patchFields(
               d,
               taskId,
               {
@@ -1486,7 +1437,7 @@ export function TaskPanel() {
             )
           }
           onSetTags={(taskId, d, tags) =>
-            patchTaskFields(d, taskId, { tags }, { tags })
+            patchFields(d, taskId, { tags }, { tags })
           }
           onDelete={(taskId, d) => deleteTask(d, taskId)}
         />
